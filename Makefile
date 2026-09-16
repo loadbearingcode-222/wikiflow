@@ -27,8 +27,10 @@ hooks:  ## Install the repo's git hooks (refuses direct pushes to main)
 build: env  ## Build the Airflow image
 	$(COMPOSE) build
 
-up: env  ## Start the whole stack
-	$(COMPOSE) up -d
+up: env  ## Build (if changed) and start the whole stack
+	# --build: without it, `up` reuses whatever image already exists, so a Dockerfile
+	# change is silently ignored. That once left dbt uninstalled for a whole phase.
+	$(COMPOSE) up -d --build
 	@echo ""
 	@echo "  Airflow UI  ->  http://localhost:8080   (airflow / airflow)"
 	@echo "  MinIO       ->  http://localhost:9001"

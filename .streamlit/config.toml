@@ -1,0 +1,20 @@
+# Deliberately a single light look rather than a light/dark pair: the chart colours are
+# validated against the light surface (#fcfcfb), and an unvalidated automatic flip to
+# dark would break the contrast checks the palette was chosen to pass.
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#f9f9f7"
+secondaryBackgroundColor = "#fcfcfb"
+textColor = "#0b0b0b"
+font = "sans serif"
+
+[server]
+headless = true
+
+[client]
+# Hide the Deploy button and developer menu; this is a viewer, not an editor.
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false

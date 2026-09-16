@@ -36,6 +36,38 @@ from wikiflow.parsing import UnparseableDomainCode, parse_domain_code
 from wikiflow.source import HourlyDump
 from wikiflow.wikidata import CompanyPage
 
+#: The most lines per hour that may fail to parse before extraction refuses the file.
+#:
+#: `ignore_errors=true` below lets DuckDB skip an unparseable line instead of aborting the
+#: hour. The cost of that convenience was measured, not assumed: a download cut off 30%
+#: of the way through, read with ignore_errors, returned 2,111,414 rows and NO error -
+#: 72% of the hour silently gone. Without the option DuckDB raises at the cut-off line.
+#:
+#: Download verification rejects such a file first, but that would make it the only
+#: defence. Across 40 real hours (~270M lines) exactly zero lines failed to parse, so
+#: this can be strict: 1 in 100,000 tolerates a stray garbage line upstream, while any
+#: truncation-scale loss fails loudly.
+MAX_MALFORMED_RATIO = 1e-5
+
+
+class MalformedRowsError(ValueError):
+    """Too many lines failed to parse for the hour to be trusted."""
+
+
+def check_malformed(
+    *, rows_scanned: int, expected_lines: int, max_ratio: float = MAX_MALFORMED_RATIO
+) -> int:
+    """Return the malformed-line count, raising if it exceeds the tolerated ratio."""
+    malformed = max(0, expected_lines - rows_scanned)
+    if expected_lines and malformed / expected_lines > max_ratio:
+        raise MalformedRowsError(
+            f"{malformed:,} of {expected_lines:,} lines did not parse "
+            f"({malformed / expected_lines:.4%}, limit {max_ratio:.4%}). Refusing to publish "
+            "a partition that may be missing rows - a truncated file looks exactly like this."
+        )
+    return malformed
+
+
 #: The four space-separated fields of a pageviews row.
 COLUMNS = {
     "domain_code": "VARCHAR",
@@ -86,9 +118,9 @@ def extract_hour(
             not the filename's hour - see ADR 0001.
         company_pages: The filter, resolved from Wikidata.
         output_dir: Directory to write the two Parquet files into.
-        expected_lines: Line count from download verification. When given, the
-            difference against parsed rows is recorded as malformed rows rather than
-            being silently absorbed.
+        expected_lines: Line count from download verification. When given, lines that
+            fail to parse are counted, and the hour is refused if they exceed
+            MAX_MALFORMED_RATIO - before anything is written.
         connection: An existing DuckDB connection, mainly for tests.
     """
     owns_connection = connection is None
@@ -120,6 +152,14 @@ def extract_hour(
         )
 
         rows_scanned = _scalar(connection, "SELECT count(*) FROM raw")
+
+        # Checked here, before a single partition is written. The DAG's verify task runs
+        # after bronze is published, which would be too late to keep a short hour out.
+        malformed = (
+            check_malformed(rows_scanned=rows_scanned, expected_lines=expected_lines)
+            if expected_lines is not None
+            else 0
+        )
 
         # --- wide grain: the denominator, and the reconciliation key --------
         connection.execute(
@@ -172,8 +212,6 @@ def extract_hour(
         company_rows, company_views = _row(
             connection, "SELECT count(*), coalesce(sum(count_views), 0) FROM company_pageviews"
         )
-
-        malformed = max(0, expected_lines - rows_scanned) if expected_lines is not None else 0
 
         return ExtractionResult(
             rows_scanned=rows_scanned,

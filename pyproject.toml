@@ -18,6 +18,15 @@ dependencies = [
 ]
 
 [dependency-groups]
+bench = [
+    "pandas>=2.2",
+    "psutil>=6",
+    "pyarrow>=17",
+]
+dashboard = [
+    "altair>=5.4",
+    "streamlit>=1.40",
+]
 dbt = [
     "dbt-duckdb>=1.9",
 ]

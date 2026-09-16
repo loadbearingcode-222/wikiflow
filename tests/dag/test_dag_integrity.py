@@ -275,3 +275,32 @@ def test_pool_is_created_below_the_documented_connection_cap() -> None:
     assert match.group(1) == WIKIMEDIA_DUMPS_POOL
     assert int(match.group(2)) == WIKIMEDIA_DUMPS_SLOTS
     assert WIKIMEDIA_DUMPS_SLOTS < WIKIMEDIA_CONNECTION_CAP
+
+
+# ---------------------------------------------------------------- the image itself
+
+
+@pytest.mark.dag
+def test_dbt_is_installed_where_the_transform_dag_calls_it() -> None:
+    """The transform DAG calls dbt by absolute path; that binary must exist and run.
+
+    Parsing the DAG proves nothing about this - the DAG file is valid whether or not dbt
+    is installed. This gap was real: the dbt virtualenv was added to the Dockerfile, the
+    local image was never rebuilt, and the transform DAG failed with
+    `/home/airflow/dbt-venv/bin/dbt: No such file or directory` the first time it ran.
+    """
+    import subprocess
+    import sys
+
+    sys.path.insert(0, str(DAG_FOLDER))
+    try:
+        import pageviews_transform as module
+    finally:
+        sys.path.remove(str(DAG_FOLDER))
+
+    dbt = Path(module.DBT)
+    assert dbt.exists(), f"{dbt} is missing - rebuild the image (`make up` builds)"
+
+    result = subprocess.run([str(dbt), "--version"], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert "duckdb" in result.stdout, "the dbt-duckdb adapter is not installed"

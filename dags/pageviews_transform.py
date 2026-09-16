@@ -65,7 +65,11 @@ def pageviews_transform() -> None:
     # but it is the artefact that makes the model layer legible to anyone else.
     generate_docs = BashOperator(
         task_id="dbt_docs_generate",
-        bash_command=f"{DBT} docs generate {COMMON_FLAGS} --target prod",
+        # A separate target path is required, not tidy. `docs generate` rewrites
+        # run_results.json, and in ITS copy every test reads status "success" - meaning
+        # compiled, not passed. Sharing the default path erased dbt build's real test
+        # verdicts, and the dashboard showed a reconciliation status with no verdict in it.
+        bash_command=f"{DBT} docs generate {COMMON_FLAGS} --target prod --target-path target/docs",
     )
 
     install_packages >> build >> generate_docs

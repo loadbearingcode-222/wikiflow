@@ -38,3 +38,6 @@ dbt/package-lock.yml
 .DS_Store
 Thumbs.db
 dbt/warehouse/
+
+# --- local agent tooling ---
+.claude/

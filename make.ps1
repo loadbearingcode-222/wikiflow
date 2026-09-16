@@ -65,7 +65,8 @@ switch ($Target.ToLowerInvariant()) {
     'build'   { Invoke-Env; Compose @('build') }
     'up'      {
         Invoke-Env
-        Compose @('up', '-d')
+        # --build: otherwise a Dockerfile change is silently ignored (see Makefile).
+        Compose @('up', '-d', '--build')
         Write-Host ''
         Write-Host '  Airflow UI  ->  http://localhost:8080   (airflow / airflow)' -ForegroundColor Green
         Write-Host '  MinIO       ->  http://localhost:9001' -ForegroundColor Green

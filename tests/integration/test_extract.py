@@ -219,3 +219,44 @@ def test_unparseable_domains_are_kept_not_dropped(tmp_path: Path) -> None:
     assert unparseable == [('""', 4321)]
     # The malformed row's views must still be counted in the total.
     assert result.total_views == 100 + 4321
+
+
+@pytest.mark.integration
+def test_too_many_unparseable_lines_refuses_the_hour_before_writing(tmp_path: Path) -> None:
+    """Truncation must fail extraction, not quietly shrink the hour.
+
+    Measured against a real file: cut off at 30%, read with ignore_errors, DuckDB
+    returned 2.1M rows and no error. The gate turns that silence into a failure, and it
+    does so before any partition exists.
+    """
+    from wikiflow.extract import MalformedRowsError
+
+    source = tmp_path / "damaged.gz"
+    with gzip.open(source, "wt", encoding="utf-8", newline="\n") as handle:
+        for index in range(100):
+            handle.write(f"en Page_{index} 1 0\n")
+        handle.write("en this line has far too many fields 1 0\n")
+
+    out = tmp_path / "out"
+    with pytest.raises(MalformedRowsError, match="did not parse"):
+        extract_hour(
+            source=str(source),
+            dump=HourlyDump.for_interval(INTERVAL),
+            company_pages=[],
+            output_dir=out,
+            expected_lines=101,
+        )
+
+    assert not (out / "domain_totals.parquet").exists(), "nothing may be written"
+    assert not (out / "company_pageviews.parquet").exists()
+
+
+@pytest.mark.unit
+def test_malformed_ratio_boundary() -> None:
+    from wikiflow.extract import MalformedRowsError, check_malformed
+
+    # Exactly at the limit is tolerated; one line over is not.
+    assert check_malformed(rows_scanned=99_999, expected_lines=100_000) == 1
+    with pytest.raises(MalformedRowsError):
+        check_malformed(rows_scanned=99_998, expected_lines=100_000)
+    assert check_malformed(rows_scanned=7_451_970, expected_lines=7_451_970) == 0

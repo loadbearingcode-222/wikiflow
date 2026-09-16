@@ -1,0 +1,10 @@
+# Keep build contexts small and free of local state.
+.venv
+.git
+logs
+dbt/target
+dbt/dbt_packages
+dbt/warehouse
+docs/img
+**/__pycache__
+.env

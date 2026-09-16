@@ -90,8 +90,10 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wikiflow}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wikiflow_dev_secret}
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # web console
+      # Bound to localhost. Docker publishes on 0.0.0.0 by default, which put MinIO -
+      # with its default development credentials - on the local network.
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # web console
     volumes:
       - minio-data:/data
     restart: always
@@ -143,8 +145,11 @@ services:
     command:
       - |
         set -e
-        mkdir -p /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins
-        chown -R "$${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins
+        # The warehouse is a NAMED volume, and Docker creates those root-owned when the
+        # image has nothing at the mount point - so without this, dbt (running as the
+        # airflow user) fails with "Permission denied" opening the DuckDB file.
+        mkdir -p /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins /opt/airflow/warehouse
+        chown -R "$${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins /opt/airflow/warehouse
         airflow db migrate
         # Global cap on connections to dumps.wikimedia.org (3 per IP). Must match
         # WIKIMEDIA_DUMPS_POOL / WIKIMEDIA_DUMPS_SLOTS in src/wikiflow_airflow/pools.py;
@@ -166,7 +171,7 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
@@ -227,6 +232,32 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+
+  # ---------------------------------------------------------------- dashboard
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    image: wikiflow/dashboard:latest
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      WIKIFLOW_S3_ENDPOINT_URL: http://minio:9000
+      WIKIFLOW_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-wikiflow}
+      WIKIFLOW_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-wikiflow_dev_secret}
+      WIKIFLOW_LAKE_BUCKET: ${WIKIFLOW_LAKE_BUCKET:-wikiflow-lake}
+      # The warehouse the transform DAG builds, and dbt's record of its test results.
+      WIKIFLOW_DUCKDB_PATH: /warehouse/wikiflow.duckdb
+      WIKIFLOW_DBT_TARGET_DIR: /dbt-target
+    volumes:
+      # Read-only: the dashboard must never be able to write to the warehouse, and it
+      # opens the file read-only anyway so dbt can take its write lock.
+      - warehouse-data:/warehouse:ro
+      - ./dbt/target:/dbt-target:ro
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    restart: always
 
 volumes:
   postgres-db-volume:
