@@ -7,8 +7,8 @@
 #   2. MinIO added as S3-compatible object storage, so the pipeline code talks s3:// and
 #      would port to real AWS by changing one endpoint URL.
 #
-# The triggerer IS kept: deferrable sensors do not work without it, and the availability
-# sensor in pageviews_ingest is deferrable by design.
+# The triggerer is kept even though the availability sensor uses reschedule mode, so
+# that sensor can be upgraded to deferrable without changing the stack.
 #
 # NOTE ON PATHS: every volume below is relative (./x). The absolute project path contains
 # a space and is deliberately never written into any config. See docs/adr/0004.
@@ -188,9 +188,10 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # Required for deferrable operators. The availability sensor defers instead of
-  # occupying a worker slot while it waits up to 5h for the dump to publish - without
-  # the triggerer that sensor would never resume.
+  # Runs deferred tasks. The availability sensor currently uses reschedule mode,
+  # which needs no triggerer - but this is kept running so the sensor can be
+  # upgraded to deferrable without a stack change, and because Airflow 3 expects
+  # a triggerer to be present in a complete deployment.
   airflow-triggerer:
     <<: *airflow-common
     command: triggerer

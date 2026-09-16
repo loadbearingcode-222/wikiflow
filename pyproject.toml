@@ -63,9 +63,9 @@ python_version = "3.12"
 files = ["src", "tests"]
 strict = true
 warn_unreachable = true
-# DAG files import airflow, which is not installed locally; they are type-checked
-# inside the container instead (see `make typecheck-container`).
-exclude = ["^dags/"]
+# dags/ and tests/dag/ import Airflow, which is intentionally not a local dependency
+# (see pyproject [project.dependencies]). They are checked inside the container.
+exclude = ["^dags/", "^tests/dag/"]
 
 [[tool.mypy.overrides]]
 module = ["duckdb.*", "boto3.*", "botocore.*"]

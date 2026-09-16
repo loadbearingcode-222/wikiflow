@@ -9,3 +9,6 @@ httpx>=0.27
 boto3>=1.35
 pydantic>=2.9
 pydantic-settings>=2.5
+
+# Test runner, so DAG integrity tests can run inside the image (make test-container).
+pytest>=8.3

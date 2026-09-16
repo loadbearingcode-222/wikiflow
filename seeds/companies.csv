@@ -1,0 +1,8 @@
+qid,name,notes
+Q3884,Amazon,Amazon.com Inc - the company. Not the river (Q3783) or the rainforest.
+Q312,Apple Inc.,Titled "Apple" on most non-English wikis; only enwiki disambiguates from the fruit.
+Q2283,Microsoft,
+Q95,Google,Google LLC - the subsidiary. Alphabet is tracked separately below.
+Q20800404,Alphabet Inc.,Google's parent. Far lower traffic than Q95; kept to show the corporate split.
+Q380,Meta Platforms,The company. The Facebook *service* is a separate entity - see Q355.
+Q355,Facebook,The service. Distinct from Meta Platforms (Q380) and much more heavily viewed.

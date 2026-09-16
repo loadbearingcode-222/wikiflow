@@ -21,3 +21,31 @@ the awkward cases that a hand-written list of examples would miss:
 - three-letter and hyphenated language codes (`bat-smg`, `zh-yue`)
 
 Licence: Wikimedia pageviews data is released under CC0.
+
+## `pageviews-sample-20260914-120000.gz`
+
+A trimmed slice of the real hourly dump for 2026-09-14 11:00 UTC (label 12:00).
+62 KB, 4,379 lines: **all 379 genuine tracked-company rows** from that hour, plus
+4,000 randomly sampled filler rows, re-sorted to preserve the source file's
+`(domain_code, page_title)` ordering.
+
+Kept small enough to commit while still being real data with real Unicode titles,
+real domain codes and real view counts. Expected extraction results:
+
+| | |
+|---|---|
+| lines | 4,379 |
+| company rows | 379 |
+| company views | 5,138 |
+| distinct domain codes | 320 |
+| total views | 15,255 |
+
+The company-view total (5,138) is identical to what the full 7.4M-row file produces,
+because every company row was kept.
+
+## `company_pages.csv`
+
+A snapshot of the Wikidata sitelink resolution for the seven seed entities: 2,238
+`(domain_code, page_title)` pairs. Committed so integration tests do not call the
+Wikidata API. Refresh it by re-running the resolver when `seeds/companies.csv`
+changes.
