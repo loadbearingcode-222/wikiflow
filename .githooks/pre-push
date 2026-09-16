@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Refuse to push directly to main.
+#
+# GitHub rulesets would enforce this server-side, but they require GitHub Pro on a
+# private repository. This hook is the portable stand-in: it lives in the repo, so
+# every clone gets it after `make hooks`.
+#
+# Deliberate escape hatch: WIKIFLOW_ALLOW_MAIN_PUSH=1 git push
+set -euo pipefail
+
+protected="main"
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    "refs/heads/$protected")
+      if [ "${WIKIFLOW_ALLOW_MAIN_PUSH:-0}" = "1" ]; then
+        echo "pre-push: WIKIFLOW_ALLOW_MAIN_PUSH=1 set - allowing direct push to $protected." >&2
+        exit 0
+      fi
+      cat >&2 <<'MSG'
+
+  Refusing to push directly to main.
+
+  This project uses a pull-request workflow (see CONTRIBUTING.md):
+
+      git switch -c feat/your-change
+      git push -u origin HEAD
+      gh pr create --fill
+
+  To override deliberately:
+
+      WIKIFLOW_ALLOW_MAIN_PUSH=1 git push
+
+MSG
+      exit 1
+      ;;
+  esac
+done
+
+exit 0

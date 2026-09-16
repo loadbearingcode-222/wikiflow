@@ -41,6 +41,7 @@ switch ($Target.ToLowerInvariant()) {
         Write-Host ''
         @(
             @('env',            'Create .env with freshly generated secrets'),
+            @('hooks',          'Install git hooks (refuses direct pushes to main)'),
             @('build',          'Build the Airflow image'),
             @('up',             'Start the whole stack'),
             @('down',           'Stop the stack, keep volumes'),
@@ -60,6 +61,7 @@ switch ($Target.ToLowerInvariant()) {
         Write-Host ''
     }
     'env'     { Invoke-Env }
+    'hooks'   { Invoke-Checked 'git' @('config', 'core.hooksPath', '.githooks'); Write-Host 'git hooks installed from .githooks/' }
     'build'   { Invoke-Env; Compose @('build') }
     'up'      {
         Invoke-Env

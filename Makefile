@@ -11,7 +11,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 
-.PHONY: help env build up down restart ps logs shell test test-container lint format typecheck check reset pin-images
+.PHONY: help env hooks build up down restart ps logs shell test test-container lint format typecheck check reset pin-images
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -19,6 +19,10 @@ help:  ## Show this help
 
 env:  ## Create .env with freshly generated secrets (no-op if it exists)
 	@bash scripts/make-env.sh
+
+hooks:  ## Install the repo's git hooks (refuses direct pushes to main)
+	git config core.hooksPath .githooks
+	@echo "git hooks installed from .githooks/"
 
 build: env  ## Build the Airflow image
 	$(COMPOSE) build
