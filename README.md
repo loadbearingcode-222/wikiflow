@@ -163,3 +163,12 @@ Pageviews data is published by the Wikimedia Foundation under
 [CC0](https://creativecommons.org/publicdomain/zero/1.0/) at
 [dumps.wikimedia.org](https://dumps.wikimedia.org/other/pageviews/). Requests identify
 themselves with a descriptive `User-Agent` as Wikimedia asks of automated clients.
+
+---
+
+## Development workflow
+
+Single-developer project, but `main` is never committed to directly: work goes through
+a pull request with green CI, so `main` stays a sequence of completed, verified changes
+and each PR carries the evidence for its change. See
+[docs/WORKFLOW.md](docs/WORKFLOW.md), and run `make hooks` once after cloning.
