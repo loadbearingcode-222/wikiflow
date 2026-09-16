@@ -32,6 +32,7 @@ from typing import Any
 
 import duckdb
 
+from wikiflow.parsing import UnparseableDomainCode, parse_domain_code
 from wikiflow.source import HourlyDump
 from wikiflow.wikidata import CompanyPage
 
@@ -126,13 +127,18 @@ def extract_hour(
             CREATE OR REPLACE TEMP TABLE domain_totals AS
             SELECT
                 domain_code,
-                sum(count_views)         AS views,
-                sum(total_response_size) AS response_bytes,
-                count(*)                 AS distinct_pages
+                -- Explicit casts: DuckDB's sum() over BIGINT yields DOUBLE, which
+                -- would make every downstream view count a float and every equality
+                -- comparison against the reconciliation oracle a float comparison.
+                sum(count_views)::BIGINT         AS views,
+                sum(total_response_size)::BIGINT AS response_bytes,
+                count(*)::BIGINT                 AS distinct_pages
             FROM raw
             GROUP BY domain_code
             """
         )
+
+        _enrich_domain_totals(connection)
 
         # --- narrow grain: rows about tracked companies ---------------------
         # An inner join against ~2,200 (domain_code, page_title) pairs. DuckDB builds
@@ -182,6 +188,84 @@ def extract_hour(
     finally:
         if owns_connection:
             connection.close()
+
+
+def _enrich_domain_totals(connection: duckdb.DuckDBPyConnection) -> None:
+    """Add (project, language, access_method) to the wide grain.
+
+    The alternative was re-implementing the domain-code scheme as a dbt macro, which
+    would mean two definitions of a genuinely tricky rule - `.m` alone means three
+    different things - drifting apart over time. Instead the Python parser, which is
+    tested against all 1,946 codes in a real hourly file, runs here and the result is
+    carried in the data.
+
+    This is cheap precisely because it runs on the AGGREGATED grain: ~1,955 distinct
+    domain codes, not 7.45M rows.
+
+    Unparseable codes are kept with `is_parseable = false` rather than dropped. A real
+    file contains a literal `""` code carrying several thousand views an hour; dropping
+    it would silently break the reconciliation against projectviews, which counts it.
+    """
+    codes = [
+        row[0]
+        for row in connection.execute("SELECT DISTINCT domain_code FROM domain_totals").fetchall()
+    ]
+
+    parsed: list[tuple[str, str | None, str | None, str | None, bool]] = []
+    for code in codes:
+        try:
+            decoded = parse_domain_code(code)
+        except UnparseableDomainCode:
+            parsed.append((code, None, None, None, False))
+        else:
+            parsed.append((code, decoded.project, decoded.language, decoded.access_method, True))
+
+    with tempfile.TemporaryDirectory(prefix="wikiflow-domains-") as tmpdir:
+        csv_path = Path(tmpdir) / "domains.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["domain_code", "project", "language", "access_method", "is_parseable"])
+            for code, project, language, access, ok in parsed:
+                writer.writerow([code, project or "", language or "", access or "", int(ok)])
+
+        connection.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE parsed_domains AS
+            SELECT
+                domain_code,
+                nullif(project, '')       AS project,
+                nullif(language, '')      AS language,
+                nullif(access_method, '') AS access_method,
+                is_parseable::BOOLEAN     AS is_parseable
+            FROM read_csv(
+                {_sql_literal(csv_path.as_posix())},
+                header = true,
+                quote = '"',
+                columns = {{
+                    'domain_code': 'VARCHAR', 'project': 'VARCHAR', 'language': 'VARCHAR',
+                    'access_method': 'VARCHAR', 'is_parseable': 'INTEGER'
+                }}
+            )
+            """
+        )
+
+    # LEFT JOIN, not INNER: every domain row must survive, parseable or not.
+    connection.execute(
+        """
+        CREATE OR REPLACE TEMP TABLE domain_totals AS
+        SELECT
+            t.domain_code,
+            p.project,
+            p.language,
+            p.access_method,
+            coalesce(p.is_parseable, false) AS is_parseable,
+            t.views,
+            t.response_bytes,
+            t.distinct_pages
+        FROM domain_totals t
+        LEFT JOIN parsed_domains p USING (domain_code)
+        """
+    )
 
 
 COMPANY_PAGE_COLUMNS = (

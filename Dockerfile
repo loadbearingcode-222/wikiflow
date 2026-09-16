@@ -19,6 +19,14 @@ ENV CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints
 COPY requirements-airflow.txt /tmp/requirements-airflow.txt
 RUN pip install --no-cache-dir --constraint "${CONSTRAINT_URL}" -r /tmp/requirements-airflow.txt
 
+# dbt lives in its own virtualenv, deliberately.
+# dbt-core and Airflow both pin jinja2, click and protobuf, and resolving them into a
+# single environment is a recurring source of breakage. An isolated venv costs ~120MB
+# and removes the conflict entirely; Airflow invokes the CLI by absolute path.
+RUN python -m venv /home/airflow/dbt-venv     && /home/airflow/dbt-venv/bin/pip install --no-cache-dir --upgrade pip     && /home/airflow/dbt-venv/bin/pip install --no-cache-dir "dbt-duckdb>=1.11,<2.0"
+
+ENV DBT_VENV_BIN=/home/airflow/dbt-venv/bin
+
 # src/ is mounted at runtime (see compose volumes) so edits do not need a rebuild;
 # this just puts it on the path.
 ENV PYTHONPATH=/opt/airflow/src

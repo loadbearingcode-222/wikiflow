@@ -38,6 +38,13 @@ x-airflow-common: &airflow-common
     WIKIFLOW_RAW_BUCKET: ${WIKIFLOW_RAW_BUCKET:-wikiflow-raw}
     WIKIFLOW_LAKE_BUCKET: ${WIKIFLOW_LAKE_BUCKET:-wikiflow-lake}
     WIKIFLOW_USER_AGENT: ${WIKIFLOW_USER_AGENT:-wikiflow/0.1 (portfolio project)}
+    # --- dbt ---
+    # The warehouse is one DuckDB file on a named volume. It is state, not source,
+    # so it is not bind-mounted into the repo.
+    WIKIFLOW_DUCKDB_PATH: /opt/airflow/warehouse/wikiflow.duckdb
+    # dbt talks to MinIO by service name; the local default is localhost:9000.
+    WIKIFLOW_S3_ENDPOINT_HOSTPORT: minio:9000
+    DBT_PROFILES_DIR: /opt/airflow/dbt
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -48,6 +55,7 @@ x-airflow-common: &airflow-common
     - ./dbt:/opt/airflow/dbt
     - ./seeds:/opt/airflow/seeds
     - ./pyproject.toml:/opt/airflow/pyproject.toml:ro
+    - warehouse-data:/opt/airflow/warehouse
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     postgres:
@@ -217,3 +225,4 @@ services:
 volumes:
   postgres-db-volume:
   minio-data:
+  warehouse-data:

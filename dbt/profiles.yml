@@ -1,0 +1,43 @@
+# Kept in the repo rather than ~/.dbt so the project runs identically on a laptop
+# and inside the Airflow container. Every environment-specific value is an env var
+# with a working local default; no absolute paths (see ADR 0004).
+wikiflow:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # Relative to the dbt project directory. The warehouse is a single file, which
+      # is most of the reason DuckDB was chosen - a reviewer can open it.
+      path: "{{ env_var('WIKIFLOW_DUCKDB_PATH', 'warehouse/wikiflow.duckdb') }}"
+      threads: 8
+      extensions:
+        - httpfs
+      # DuckDB's modern credential mechanism. The older `SET s3_access_key_id` style
+      # still works but is deprecated.
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('WIKIFLOW_S3_ACCESS_KEY', 'wikiflow') }}"
+          secret: "{{ env_var('WIKIFLOW_S3_SECRET_KEY', 'wikiflow_dev_secret') }}"
+          endpoint: "{{ env_var('WIKIFLOW_S3_ENDPOINT_HOSTPORT', 'localhost:9000') }}"
+          region: "us-east-1"
+          use_ssl: false
+          url_style: "path"
+
+    prod:
+      type: duckdb
+      # Relative to the dbt project directory. The warehouse is a single file, which
+      # is most of the reason DuckDB was chosen - a reviewer can open it.
+      path: "{{ env_var('WIKIFLOW_DUCKDB_PATH', 'warehouse/wikiflow.duckdb') }}"
+      threads: 8
+      extensions:
+        - httpfs
+      # DuckDB's modern credential mechanism. The older `SET s3_access_key_id` style
+      # still works but is deprecated.
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('WIKIFLOW_S3_ACCESS_KEY', 'wikiflow') }}"
+          secret: "{{ env_var('WIKIFLOW_S3_SECRET_KEY', 'wikiflow_dev_secret') }}"
+          endpoint: "{{ env_var('WIKIFLOW_S3_ENDPOINT_HOSTPORT', 'localhost:9000') }}"
+          region: "us-east-1"
+          use_ssl: false
+          url_style: "path"

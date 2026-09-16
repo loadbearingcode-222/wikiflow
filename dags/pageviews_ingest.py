@@ -27,7 +27,7 @@ from typing import Any
 import httpx
 import pendulum
 from airflow.providers.standard.sensors.python import PythonSensor
-from airflow.sdk import Asset, dag, task
+from airflow.sdk import dag, task
 
 from wikiflow.config import get_settings
 from wikiflow.download import download_dump
@@ -35,11 +35,9 @@ from wikiflow.extract import extract_hour
 from wikiflow.source import HourlyDump
 from wikiflow.storage import overwrite_partition
 from wikiflow.wikidata import CompanyPage, load_companies, resolve_company_pages
+from wikiflow_airflow.assets import BRONZE_COMPANY_PAGEVIEWS, BRONZE_DOMAIN_TOTALS
 
 COMPANY_SEED = Path("/opt/airflow/seeds/companies.csv")
-
-#: Downstream dbt models subscribe to this rather than sensing on this DAG.
-BRONZE_ASSET = Asset("s3://wikiflow-lake/bronze/company_pageviews")
 
 # Publication latency was measured at 1h20m-2h50m after the labelled hour, which is
 # 2h20m-3h50m after the end of the interval the file actually covers (ADR 0001). Five
@@ -194,7 +192,7 @@ def pageviews_ingest() -> None:
             "total_views": extracted.total_views,
         }
 
-    @task(outlets=[BRONZE_ASSET])
+    @task(outlets=[BRONZE_COMPANY_PAGEVIEWS, BRONZE_DOMAIN_TOTALS])
     def verify(stats: dict[str, Any]) -> dict[str, Any]:
         """Gate the partition before anything downstream can see it.
 

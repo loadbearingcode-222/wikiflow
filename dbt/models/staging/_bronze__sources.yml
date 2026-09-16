@@ -1,0 +1,49 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Parquet partitions written by the pageviews_ingest DAG. Read straight out of
+      object storage rather than loaded first - DuckDB scans S3 natively, and the
+      volume (tens of KB per hour) never justifies a copy.
+    meta:
+      written_by: dags/pageviews_ingest.py
+
+    tables:
+      - name: company_pageviews
+        description: Narrow grain - one row per tracked company article per hour.
+        meta:
+          # hive_partitioning=false is load-bearing. dt and hour are stored INSIDE the
+          # parquet (so the files stay self-describing if moved), but DuckDB also
+          # auto-detects them from the `dt=`/`hour=` path and the PATH version wins -
+          # arriving as VARCHAR and shadowing the correctly-typed INTEGER column.
+          external_location: >-
+            read_parquet('s3://wikiflow-lake/bronze/company_pageviews/dt=*/hour=*/*.parquet',
+                         hive_partitioning=false)
+
+      - name: domain_totals
+        description: >
+          Wide grain - total views per domain_code per hour. The denominator for
+          share-of-traffic, and the key that reconciles against projectviews.
+        meta:
+          external_location: >-
+            read_parquet('s3://wikiflow-lake/bronze/domain_totals/dt=*/hour=*/*.parquet',
+                         hive_partitioning=false)
+
+  - name: raw
+    description: Unmodified source files, retained for 7 days (ADR 0003).
+    tables:
+      - name: projectviews
+        description: >
+          Wikimedia's own per-project hourly totals. Used ONLY as an independent oracle
+          for the reconciliation test, never as a modelling input - treating it as input
+          would make the test circular.
+        meta:
+          # names=/types= rather than columns={...}: dbt-duckdb format_maps this string,
+          # so literal braces would be parsed as placeholders and raise a KeyError.
+          external_location: >-
+            read_csv('s3://wikiflow-raw/projectviews/dt=*/hour=*/projectviews-*',
+                     delim=' ', header=false, quote='',
+                     names=['domain_code', 'page_title', 'count_views', 'total_response_size'],
+                     types=['VARCHAR', 'VARCHAR', 'BIGINT', 'BIGINT'],
+                     hive_partitioning=true)

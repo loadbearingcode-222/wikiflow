@@ -8,6 +8,7 @@ and are safe to run anywhere.
 from __future__ import annotations
 
 import csv
+import gzip
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -151,3 +152,70 @@ def test_no_company_rows_when_filter_is_empty(tmp_path: Path) -> None:
     assert result.company_rows == 0
     # The wide grain is unaffected by the filter.
     assert result.total_views == EXPECTED_TOTAL_VIEWS
+
+
+@pytest.mark.integration
+def test_wide_grain_carries_parsed_domain_attributes(result: ExtractionResult) -> None:
+    """The wide grain must arrive pre-parsed, so dbt never re-implements the scheme.
+
+    Re-implementing `.m` handling in SQL would mean two definitions of a rule where
+    the same token means three different things, drifting apart over time.
+
+    The codes checked here are chosen to cover all three meanings of `.m` at once.
+    """
+    connection = duckdb.connect()
+    rows = connection.execute(
+        f"""
+        SELECT domain_code, project, language, access_method, is_parseable
+        FROM '{result.domain_path.as_posix()}'
+        WHERE domain_code IN ('en', 'en.m', 'commons.m', 'commons.m.m', 'it.m.q', 'm.wd')
+        ORDER BY domain_code
+        """
+    ).fetchall()
+
+    assert rows == [
+        # `.m` as the wikimedia.org project suffix - DESKTOP, not mobile
+        ("commons.m", "wikimedia", "commons", "desktop", True),
+        # both meanings at once
+        ("commons.m.m", "wikimedia", "commons", "mobile-web", True),
+        ("en", "wikipedia", "en", "desktop", True),
+        # `.m` as the mobile marker
+        ("en.m", "wikipedia", "en", "mobile-web", True),
+        ("it.m.q", "wikiquote", "it", "mobile-web", True),
+        # prefix-less wiki: the mobile marker leads
+        ("m.wd", "wikidata", None, "mobile-web", True),
+    ]
+
+
+@pytest.mark.integration
+def test_unparseable_domains_are_kept_not_dropped(tmp_path: Path) -> None:
+    """Dropping them would silently break reconciliation against projectviews.
+
+    Real files contain a literal `""` domain code carrying several thousand views an
+    hour, and Wikimedia counts it in their own per-project totals. Discarding it would
+    make our sum smaller than theirs.
+
+    Built synthetically rather than taken from the sample fixture: the sample happens
+    to contain no malformed codes, and a test that silently passes because its input
+    lacks the case it checks is worse than no test.
+    """
+    source = tmp_path / "malformed.gz"
+    with gzip.open(source, "wt", encoding="utf-8", newline="\n") as handle:
+        handle.write("en Apple_Inc. 100 0\n")
+        handle.write('"" Some_Page 4321 0\n')
+
+    result = extract_hour(
+        source=str(source),
+        dump=HourlyDump.for_interval(INTERVAL),
+        company_pages=[],
+        output_dir=tmp_path / "out",
+    )
+
+    connection = duckdb.connect()
+    unparseable = connection.execute(
+        f"SELECT domain_code, views FROM '{result.domain_path.as_posix()}' WHERE NOT is_parseable"
+    ).fetchall()
+
+    assert unparseable == [('""', 4321)]
+    # The malformed row's views must still be counted in the total.
+    assert result.total_views == 100 + 4321

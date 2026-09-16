@@ -107,3 +107,47 @@ def test_bronze_asset_is_published(dagbag) -> None:
     outlets = [uri for task in dag.tasks for uri in getattr(task, "outlets", [])]
 
     assert outlets, "no task publishes an Asset; downstream models cannot be triggered"
+
+
+# ---------------------------------------------------------------- transform DAG
+
+
+@pytest.mark.dag
+def test_transform_dag_is_asset_triggered_not_scheduled(dagbag) -> None:
+    """Transformation must react to ingestion, not run on a hopeful cron.
+
+    Source publication latency varies by about 90 minutes (ADR 0001), so any fixed
+    offset after the hour would either fire before the data exists or waste time
+    waiting. An Asset dependency removes the guess entirely.
+    """
+    dag = dagbag.dags["pageviews_transform"]
+
+    assert not isinstance(dag.schedule, str), (
+        f"expected an Asset schedule, got the cron/preset {dag.schedule!r}"
+    )
+    uris = {getattr(asset, "uri", None) for asset in dag.schedule}
+    assert "s3://wikiflow-lake/bronze/company_pageviews" in uris
+
+
+@pytest.mark.dag
+def test_ingest_and_transform_agree_on_the_asset_uri(dagbag) -> None:
+    """The producing outlet and the consuming schedule must name the same URI.
+
+    They are coupled by string, so a typo in either would not error - the transform
+    DAG would simply never trigger, silently, forever.
+    """
+    ingest = dagbag.dags["pageviews_ingest"]
+    transform = dagbag.dags["pageviews_transform"]
+
+    produced = {getattr(outlet, "uri", None) for task in ingest.tasks for outlet in task.outlets}
+    consumed = {getattr(asset, "uri", None) for asset in transform.schedule}
+
+    assert consumed <= produced, (
+        f"transform waits on {consumed - produced}, which no ingest task produces"
+    )
+
+
+@pytest.mark.dag
+def test_transform_dag_runs_one_at_a_time(dagbag) -> None:
+    """Concurrent dbt runs would contend for the same DuckDB file for no benefit."""
+    assert dagbag.dags["pageviews_transform"].max_active_runs == 1

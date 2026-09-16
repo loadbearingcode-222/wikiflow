@@ -30,7 +30,11 @@ scratch/
 dbt/target/
 dbt/dbt_packages/
 dbt/logs/
+dbt/.user.yml
+dbt/warehouse/
+dbt/package-lock.yml
 
 # --- os ---
 .DS_Store
 Thumbs.db
+dbt/warehouse/

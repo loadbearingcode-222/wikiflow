@@ -44,6 +44,9 @@ The reasoning behind each is in [`docs/adr/`](docs/adr/). The short version:
 | Two grains per hour | Filtering to five companies alone would leave no denominator — you could report a view count but not whether it was unusual | Ingesting only the filtered rows |
 | Entity resolution via Wikidata | `Apple Inc.` is `Apple_Inc.` in English, `Apple` in French, `アップル` in Japanese. A hardcoded title list is wrong on arrival | Hardcoding English titles |
 | No Airflow imports in `src/` | Keeps the logic testable without a scheduler and the unit suite runnable on Windows in milliseconds | Putting logic directly in DAG files, the usual shape, which makes it untestable in isolation |
+| Domain-code parsing in Python, not a dbt macro | `.m` means three different things depending on position; two implementations would drift. Affordable because it runs on the aggregated grain (~1,955 codes), not per row | Re-deriving it in SQL, which is the obvious choice and the wrong one |
+| dbt in its own virtualenv | dbt-core and Airflow both pin jinja2, click and protobuf; one environment breaks at runtime rather than install time | Installing dbt alongside Airflow, or a separate dbt container via DockerOperator |
+| Asset-triggered transforms | Source publication latency varies by ~90 minutes, so any cron offset is wrong in one direction | A scheduled transform DAG, or a cross-DAG sensor |
 
 ---
 
@@ -63,9 +66,13 @@ dumps.wikimedia.org  (hourly .gz, immutable)
      ├── company_pageviews     379 rows/hr    the detailed fact grain
      └── domain_totals       1,955 rows/hr    the denominator + reconciliation key
       │
-      ▼   dbt-duckdb
-   SILVER → GOLD   dim_company, dim_project, fct_company_pageviews_hourly,
-                   agg_company_share_of_traffic
+      ▼   dbt-duckdb, triggered by an Airflow Asset (not a cron)
+   STAGING  stg_company_pageviews, stg_domain_totals
+      │
+      ▼
+   MARTS    dim_company, dim_wiki,
+            fct_company_pageviews_hourly  (incremental, delete+insert)
+            agg_company_share_of_traffic, agg_company_daily
       │
       ▼
    Streamlit dashboard + freshness panel
@@ -83,6 +90,9 @@ Measured against the live source, not asserted:
 | Idempotency | two full runs of one hour → 1 object per partition, 379 company rows, 5,138 views, both times |
 | Integrity | 7,451,970 lines parsed, **0 malformed** |
 | Compression | 62 MB gzip → 236 MB (3.6x); bronze output 23 KB total |
+| dbt | 7 models, 24 schema tests, 1 reconciliation test — **31/31 pass** in 0.9s |
+| Model idempotency | rebuilding the incremental fact table leaves 1,201 rows and 15,372 views unchanged |
+| Replay | bronze regenerated from raw in object storage in **4s/hour**, no re-download |
 
 ### Storage lifecycle
 
@@ -136,7 +146,7 @@ genuinely need a scheduler run in the container instead, which is also what CI d
 
 - [x] **Phase 0** — Foundation: containerized stack, quality gates, CI
 - [x] **Phase 1** — Ingestion: sensor, verified download, two-grain extraction, idempotent partitions
-- [ ] **Phase 2** — Modeling: dbt staging and marts, star schema, reconciliation test
+- [x] **Phase 2** — Modeling: dbt staging and marts, star schema, reconciliation test
 - [ ] **Phase 3** — Operations: audit table, quality gates, retention DAG, runbook
 - [ ] **Phase 4** — Presentation: dashboard, benchmarks, failure drills
 - [ ] **Phase 5** — Depth: Postgres warehouse behind the same interface, redirect resolution

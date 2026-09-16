@@ -1,0 +1,71 @@
+version: 2
+
+models:
+  - name: dim_company
+    description: One row per tracked Wikidata entity.
+    columns:
+      - name: company_qid
+        data_tests: [unique, not_null]
+      - name: language_editions
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+
+  - name: dim_wiki
+    description: One row per domain_code, with its decomposition.
+    columns:
+      - name: domain_code
+        data_tests: [unique, not_null]
+
+  - name: fct_company_pageviews_hourly
+    description: Fact table at (hour, company, domain, article) grain.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              [view_date, view_hour, company_qid, domain_code, page_title]
+    columns:
+      - name: company_qid
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_company')
+                field: company_qid
+      - name: views
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+                inclusive: true
+
+  - name: agg_company_share_of_traffic
+    description: Hourly company views as a share of all Wikimedia traffic.
+    columns:
+      - name: total_views
+        data_tests: [not_null]
+      - name: share_of_traffic
+        description: Always between 0 and 1. Above 1 means the denominator is wrong.
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+                inclusive: true
+
+  - name: agg_company_daily
+    description: Daily rollup per company with the desktop/mobile split.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [view_date, company_qid]
+    columns:
+      - name: mobile_share
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+                inclusive: true

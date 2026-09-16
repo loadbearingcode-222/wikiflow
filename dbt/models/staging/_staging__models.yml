@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: stg_company_pageviews
+    description: Typed narrow grain - tracked company articles, hourly.
+    columns:
+      - name: company_qid
+        description: Wikidata entity id.
+        data_tests: [not_null]
+      - name: view_date
+        data_tests: [not_null]
+      - name: views
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+                inclusive: true
+      - name: access_method
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["desktop", "mobile-web"]
+
+  - name: stg_domain_totals
+    description: Typed wide grain - per-project hourly totals.
+    data_tests:
+      # One row per domain per hour. A duplicate would double the denominator and
+      # silently halve every share-of-traffic figure.
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [view_date, view_hour, domain_code]
+    columns:
+      - name: domain_code
+        data_tests: [not_null]
+      - name: views
+        data_tests: [not_null]
+      - name: access_method
+        data_tests:
+          - accepted_values:
+              config:
+                # Unparseable codes legitimately have no access method.
+                where: "is_parseable"
+              arguments:
+                values: ["desktop", "mobile-web"]

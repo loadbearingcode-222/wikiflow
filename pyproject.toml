@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [dependency-groups]
+dbt = [
+    "dbt-duckdb>=1.9",
+]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
@@ -31,7 +34,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/wikiflow"]
+packages = ["src/wikiflow", "src/wikiflow_airflow"]
 
 # ---------------------------------------------------------------- ruff
 [tool.ruff]
@@ -65,7 +68,7 @@ strict = true
 warn_unreachable = true
 # dags/ and tests/dag/ import Airflow, which is intentionally not a local dependency
 # (see pyproject [project.dependencies]). They are checked inside the container.
-exclude = ["^dags/", "^tests/dag/"]
+exclude = ["^dags/", "^tests/dag/", "^src/wikiflow_airflow/"]
 
 [[tool.mypy.overrides]]
 module = ["duckdb.*", "boto3.*", "botocore.*"]
