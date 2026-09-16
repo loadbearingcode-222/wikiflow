@@ -8,7 +8,7 @@ should be changed rather than tolerated.
 
 ```bash
 docker compose ps                                    # all services healthy?
-docker compose exec airflow-scheduler airflow dags list-runs -d pageviews_ingest --state failed
+docker compose exec airflow-scheduler airflow dags list-runs pageviews_ingest --state failed
 ```
 
 Or trigger the checks directly:
@@ -82,7 +82,7 @@ slower task-level retry rather than shortening the wait.
 
 ```bash
 docker compose exec airflow-scheduler airflow pools list          # wikimedia_dumps | 2 ?
-docker compose exec airflow-scheduler airflow dags list-runs -d pageviews_ingest --state running
+docker compose exec airflow-scheduler airflow dags list-runs pageviews_ingest --state running
 ```
 
 If the pool is missing, tasks assigned to it will not run at all — recreate it:
@@ -131,20 +131,35 @@ this is a broken filter, not a quiet hour.
 
 **Means:** one or more hours have no bronze partition.
 
-**Action:** backfill exactly those hours. The scheduler owns it, so it survives your
-shell:
+**Action:** first establish whether Airflow already has a run for that hour, because
+the recovery command depends on it. Airflow 3.3 allows **one run per logical date** — a
+second `dags trigger` for the same hour fails with `duplicate key ... dag_run_dag_id_
+logical_date_key`.
 
 ```bash
-docker compose exec airflow-scheduler airflow backfill create \
-  --dag-id pageviews_ingest \
-  --from-date 2026-09-14T03:00:00+00:00 \
-  --to-date   2026-09-14T05:00:00+00:00 \
-  --max-active-runs 2 --reprocess-behavior failed
+# dag_id is positional. Filter by the hour in the output, not with --start-date /
+# --end-date: those filter by when a run EXECUTED, not by which hour it covers.
+docker compose exec airflow-scheduler airflow dags list-runs pageviews_ingest | grep "2026-09-14T0[3-5]"
 ```
 
-Load on Wikimedia is bounded by the `wikimedia_dumps` pool, not by this flag — the pool
-holds across backfill, scheduled and manual runs, and this flag does not. `--max-active-runs
-2` just matches the pool, so extra runs are not started only to wait for a slot.
+| Situation | Command |
+|---|---|
+| **A run exists** — including one marked *success* whose partition was later lost | `airflow tasks clear` (below) |
+| **No run exists** for the hour | `airflow backfill create` (below) |
+
+A run that exists and succeeded is the case the backfill command gets wrong:
+`--reprocess-behavior failed` skips successful runs, so it would leave the hole in place.
+This was found by deleting a published partition deliberately — see `FAILURE_DRILLS.md`.
+
+```bash
+# A run exists: re-run it in place. Measured: 21 seconds, identical partition restored.
+docker compose exec airflow-scheduler airflow tasks clear pageviews_ingest   --start-date 2026-09-14T03:00:00+00:00 --end-date 2026-09-14T05:00:00+00:00 --yes
+
+# No run exists: create runs. The scheduler owns them, so they survive your shell.
+docker compose exec airflow-scheduler airflow backfill create   --dag-id pageviews_ingest   --from-date 2026-09-14T03:00:00+00:00 --to-date 2026-09-14T05:00:00+00:00   --max-active-runs 2
+```
+
+Load on Wikimedia is bounded by the `wikimedia_dumps` pool whichever you use.
 
 If the gap is older than the 7-day retention window the raw file is gone locally, but
 Wikimedia's dumps are archival — the same backfill works, just with a re-download.
@@ -159,7 +174,7 @@ Wikimedia's dumps are archival — the same backfill works, just with a re-downl
 
 1. Is the scheduler alive? `docker compose ps`
 2. Is the DAG paused? `airflow dags list` → `is_paused`
-3. Are runs failing? `airflow dags list-runs -d pageviews_ingest --state failed`
+3. Are runs failing? `airflow dags list-runs pageviews_ingest --state failed`
 4. Is Wikimedia publishing at all? Open
    <https://dumps.wikimedia.org/other/pageviews/2026/2026-09/> and look at the newest
    file.
@@ -261,11 +276,27 @@ docker compose exec airflow-scheduler /home/airflow/dbt-venv/bin/dbt build \
 Safe at any time: the marts are derived, and a full refresh is idempotent.
 
 **Re-run one hour end to end.** Safe by construction — every task replaces its
-partition wholesale, so re-running cannot double-count (ADR 0002). Use `airflow dags
-trigger` rather than `airflow dags test`: `dags test` runs in-process and **ignores
-pools**, so it can push the pipeline past Wikimedia's connection cap while anything
-else is running.
+partition wholesale, so re-running cannot double-count (ADR 0002). Clear the existing
+run rather than triggering a new one: Airflow permits one run per logical date, so
+`dags trigger --logical-date` for an hour that has a run fails with a uniqueness error.
 
 ```bash
-docker compose exec airflow-scheduler airflow dags trigger pageviews_ingest --logical-date 2026-09-14T11:00:00+00:00
+docker compose exec airflow-scheduler airflow tasks clear pageviews_ingest   --start-date 2026-09-14T11:00:00+00:00 --end-date 2026-09-14T11:00:00+00:00 --yes
 ```
+
+Avoid `airflow dags test` for this while anything else is running: it executes
+in-process and **ignores pools**, so it can push past Wikimedia's connection cap.
+
+**A task stuck in `restarting`.** Clearing a task Airflow believes is *running* sets it
+to `restarting`, which waits for that process to exit first. If the process is already
+dead — its container was restarted, which kills everything inside — it waits forever.
+Confirm it is dead (the container's start time is later than the task's start time),
+mark it failed, then clear it:
+
+```bash
+docker inspect -f '{{.State.StartedAt}}' wikiflow-airflow-scheduler-1   # later than the task start?
+# mark failed via the REST API, then:
+docker compose exec airflow-scheduler airflow tasks clear pageviews_ingest   --start-date <hour> --end-date <hour> --yes
+```
+
+Forcing state is correct only here, where the recorded state is already false.

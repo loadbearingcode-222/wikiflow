@@ -2,10 +2,29 @@
 
 An hourly incremental data pipeline over Wikimedia pageviews, built to answer one question:
 
-> How does public attention to the five largest tech companies move hour by hour, across
-> every language edition of Wikipedia — and what share of all Wikipedia traffic is it?
+> How does public attention to the largest tech companies move hour by hour, across every
+> language edition of Wikipedia — and what share of all Wikimedia traffic is it?
 
-**Status:** Phases 0-1 complete - the pipeline ingests a real hour end to end, idempotently. See [Roadmap](#roadmap).
+Airflow 3 · DuckDB · dbt · MinIO (S3) · Streamlit · Docker Compose
+
+**Status:** Phases 0–4 complete. 48 hours ingested with no gaps, every hour reconciled
+exactly against Wikimedia's own published totals.
+
+---
+
+## The evidence
+
+Every figure here was measured on the running pipeline, not asserted. Where a number
+comes from, the linked document shows how.
+
+| | |
+|---|---|
+| **Correctness** | Our per-domain totals, computed independently from ~7M rows an hour, match Wikimedia's published `projectviews` **exactly** — 95,393 domain-hours, 891,391,619 views, zero mismatches |
+| **Completeness** | 48 of 48 hours present; the gap check proves it rather than assuming it |
+| **Integrity** | 0 unparseable lines across ~270 million; a truncated file is refused before anything is written |
+| **Idempotency** | Re-running an hour leaves the same rows and the same totals; a lost partition was restored identically in **21 s** ([drills](docs/FAILURE_DRILLS.md)) |
+| **Throughput** | DuckDB extracts both grains from 7,635,493 rows in **3.66 s using 201 MB**; the pandas equivalent takes 8.57 s and **1,922 MB** — identical output, median of 3 ([benchmark](scripts/benchmark_extraction.py)) |
+| **Operation** | 17–21 s to ingest an hour; an Airflow pool keeps the pipeline under the source's 3-connection limit |
 
 ---
 
@@ -13,164 +32,198 @@ An hourly incremental data pipeline over Wikimedia pageviews, built to answer on
 
 Most data engineering portfolio projects ingest a static CSV on a schedule. That skips the
 part that is actually hard in production: **knowing which data is new**, and being able to
-re-run without corrupting what you already have.
+re-run without corrupting what is already there.
 
-This pipeline is built around that problem specifically.
+Wikimedia publishes one immutable gzipped file per hour — about 7 million rows, 45–70 MB.
+Because the source is partitioned by time, the pipeline needs **no stored watermark, no
+`updated_at` column and no change-data-capture**: the Airflow data interval *is* the
+watermark. That makes the important properties provable rather than hoped for:
 
-Wikimedia publishes one immutable gzipped file per hour, roughly 8 million rows and 50–70 MB
-each. Because the data is partitioned by time at the source, the pipeline needs **no stored
-watermark, no `updated_at` column, and no change-data-capture** — the Airflow data interval
-*is* the watermark. That is the cleanest version of a pattern most production pipelines
-should use, and it makes correctness properties provable rather than hoped for:
-
-- **Re-running any hour is a no-op.** Each task writes exactly one partition and overwrites it
-  wholesale. There is no append path, so there is no way to double-count.
-- **Backfilling is the same code as live ingestion.** No separate backfill script exists,
-  because none is needed.
+- **Re-running any hour is safe.** Each task replaces exactly one partition wholesale. There
+  is no append path, so there is no way to double-count.
+- **Backfill is the same code as live ingestion.** There is no separate backfill logic.
 - **A gap is detectable.** A missing partition is a missing directory, not a silent absence.
+
+---
+
+## When things broke
+
+A pipeline that has only ever succeeded hasn't been tested. [`docs/FAILURE_DRILLS.md`](docs/FAILURE_DRILLS.md)
+covers one real incident and three deliberate drills, with measured results:
+
+- **Incident — rate-limited by the source.** Up to five concurrent downloads against a
+  3-connections-per-IP limit produced `429 Too Many Requests`. Misdiagnosed twice before
+  the audit trail — which records failed attempts, not just final states — made the cause
+  obvious. Fixed with an Airflow pool and `Retry-After`-honouring retries.
+- **A truncated download.** Read with `ignore_errors`, a file cut off at 30% returned
+  2.1 million rows and **no error** — 72% of the hour silently gone. Now refused.
+- **A lost partition.** Detected by the gap check, restored identically. The drill also
+  proved the documented recovery command wrong; the runbook is fixed.
+- **Retention misconfigured to expire everything.** Refused; 98 of 98 raw partitions kept.
+
+---
+
+## Dashboard
+
+A Streamlit dashboard at <http://localhost:8501> shows attention over time, share of all
+Wikimedia traffic, the language breakdown per company, the mobile/desktop split, and
+pipeline health read from the audit trail.
+
+It is built to avoid specific misreadings. Company colours follow the entity, so filtering
+never repaints the others, and the palette is validated for colour-blind separation by
+script. Views and share of traffic are a toggle, never two y-axes on one chart. Lines break
+at missing hours instead of drawing across them. Every chart has a table view. And the
+reconciliation tile reports **dbt's own recorded verdict** — or "not run" if there isn't
+one — rather than asserting a result.
+
+One thing the data shows that deserves care: German Wikipedia's article on the company is
+titled plain "Apple", unlike English Wikipedia's "Apple Inc.", so it also attracts readers
+looking for something else. On 2026-09-14 at 19:00 UTC that article took 13,965 views
+(desktop and mobile together), against a median of 47 an hour across the 49 hours
+loaded. The dashboard labels the spike; it doesn't guess at a cause.
 
 ---
 
 ## Design decisions
 
-The reasoning behind each is in [`docs/adr/`](docs/adr/). The short version:
+The reasoning behind each is in [`docs/adr/`](docs/adr/).
 
 | Decision | Why | What was rejected |
 |---|---|---|
-| Partition-as-watermark | The source is time-partitioned and immutable, so state can live in the data's own location instead of a cursor table | A stored high-watermark, which would add a crash window between "data committed" and "watermark advanced" |
-| DuckDB as the warehouse | Parses ~8M rows/hour in seconds, zero operational overhead, and the whole warehouse is a single file a reviewer can open | Postgres — genuinely slow at this row count; planned later as a second implementation behind the same interface |
-| MinIO for object storage | The pipeline addresses storage as `s3://` and would move to real AWS by changing one endpoint URL, at zero cost | The local filesystem, which would not exercise any of the object-storage semantics that matter |
-| LocalExecutor, not Celery | Drops the Redis and worker containers; an hourly pipeline does not need distributed task execution | CeleryExecutor, which doubles the memory footprint to demonstrate parallelism this workload never uses |
-| Two grains per hour | Filtering to five companies alone would leave no denominator — you could report a view count but not whether it was unusual | Ingesting only the filtered rows |
-| Entity resolution via Wikidata | `Apple Inc.` is `Apple_Inc.` in English, `Apple` in French, `アップル` in Japanese. A hardcoded title list is wrong on arrival | Hardcoding English titles |
-| No Airflow imports in `src/` | Keeps the logic testable without a scheduler and the unit suite runnable on Windows in milliseconds | Putting logic directly in DAG files, the usual shape, which makes it untestable in isolation |
-| Domain-code parsing in Python, not a dbt macro | `.m` means three different things depending on position; two implementations would drift. Affordable because it runs on the aggregated grain (~1,955 codes), not per row | Re-deriving it in SQL, which is the obvious choice and the wrong one |
-| dbt in its own virtualenv | dbt-core and Airflow both pin jinja2, click and protobuf; one environment breaks at runtime rather than install time | Installing dbt alongside Airflow, or a separate dbt container via DockerOperator |
-| Asset-triggered transforms | Source publication latency varies by ~90 minutes, so any cron offset is wrong in one direction | A scheduled transform DAG, or a cross-DAG sensor |
-| Audit is append-only, data is overwrite | A partition that failed twice before succeeding should keep all three records; overwriting erases the history you want during an incident | Recording only the latest attempt, or only successes |
-| Anomaly check compares the same hour across days | Traffic swings ~1.6x daily, so an hour-over-hour check fires every dawn and dusk until people stop reading it | Comparing against the previous hour, or a fixed row-count floor |
-| Retention is its own DAG | Backfill runs execute out of order, so a cleanup task inside ingestion could delete data a later run still needs | A cleanup task at the end of the ingest DAG |
+| Partition-as-watermark | The source is time-partitioned and immutable, so state can live in the data's own location | A stored high-watermark, with its crash window between "data committed" and "watermark advanced" |
+| DuckDB as the warehouse | Handles ~7M rows an hour in seconds and ~200 MB, with no server; the warehouse is one file | Postgres — a server to operate for a single-user analytical warehouse |
+| MinIO for object storage | The pipeline addresses `s3://`; moving to AWS is one endpoint URL | The local filesystem |
+| Two grains per hour | Filtering to the companies alone leaves no denominator — a count, but no way to tell if it was unusual | Ingesting only the filtered rows |
+| Entity resolution via Wikidata | `Apple Inc.` is `Apple_Inc.` in English, `Apple` in French, `アップル` in Japanese | A hardcoded list of titles |
+| No Airflow imports in `src/wikiflow` | Logic is testable without a scheduler; the unit suite runs in about 2 seconds | Logic inside DAG files |
+| Domain-code parsing in Python, not dbt | `.m` means three different things by position; two implementations would drift | Re-deriving it in SQL |
+| An Airflow pool for the source | `max_active_runs` is per DAG and counts run types separately; it did not prevent the incident | Relying on `max_active_runs` |
+| Refuse hours with unparseable lines | `ignore_errors` silently turned a truncated file into a plausible short hour | Counting malformed lines without acting on the count |
+| Asset-triggered transforms | Source publication lag varies by ~90 minutes, so any cron offset is wrong one way or the other | A scheduled transform DAG |
+| Audit is append-only, data is overwrite | A partition that failed twice before succeeding keeps all three records | Recording only the latest attempt |
+| Anomaly check compares the same hour across days | Traffic swings ~1.6× daily, so hour-over-hour checks fire every dawn and dusk | Comparing with the previous hour |
+| Retention is its own DAG | Backfill runs out of order, so a cleanup step inside ingestion could delete data still needed | A cleanup task in the ingest DAG |
 
 ---
 
 ## Architecture
 
 ```
-dumps.wikimedia.org  (hourly .gz, immutable)
+dumps.wikimedia.org  (hourly .gz, immutable; limit: 3 connections per IP)
       │
-      ▼   availability sensor, reschedule mode (10-min poke, 5h timeout)
-   download → verify → upload raw bytes
+      ▼   sensor + download, both in the `wikimedia_dumps` pool (2 slots)
+   download → verify (length, gzip CRC, lines) → land raw bytes
       │
-      ▼   RAW  (immutable, 7-day retention)
-   s3://wikiflow-raw/pageviews/dt=YYYY-MM-DD/hour=HH/
+      ▼   RAW   s3://wikiflow-raw/…/dt=YYYY-MM-DD/hour=HH/        7-day retention
       │
-      ▼   DuckDB reads the .gz from MinIO — ONE scan, TWO outputs
-   BRONZE  (kept indefinitely)
-     ├── company_pageviews     379 rows/hr    the detailed fact grain
-     └── domain_totals       1,955 rows/hr    the denominator + reconciliation key
+      ▼   one DuckDB scan, two outputs; refused if lines fail to parse
+   BRONZE  company_pageviews   ~400 rows/hr    the fact grain            kept
+           domain_totals     ~1,950 rows/hr    denominator + reconciliation key
       │
-      ▼   dbt-duckdb, triggered by an Airflow Asset (not a cron)
-   STAGING  stg_company_pageviews, stg_domain_totals
-      │
-      ▼
-   MARTS    dim_company, dim_wiki,
-            fct_company_pageviews_hourly  (incremental, delete+insert)
-            agg_company_share_of_traffic, agg_company_daily
+      ▼   dbt, triggered by an Airflow Asset
+   MARTS   dim_company, dim_wiki, fct_company_pageviews_hourly (incremental),
+           agg_company_share_of_traffic, agg_company_daily
       │
       ▼
-   Streamlit dashboard + freshness panel
+   Streamlit dashboard  (reads marts, dbt run results, and the audit trail)
 
-   ── independent ops DAGs ──
-   pageviews_quality   hourly: gaps, freshness, volume anomalies
-   raw_retention       daily : dry-run manifest, then delete past the window
+   independent ops DAGs:  pageviews_quality  (hourly: gaps, freshness, volume)
+                          raw_retention      (daily: dry-run manifest, then delete)
 ```
 
-### Verified behaviour
-
-Measured against the live source, not asserted:
-
-| | |
-|---|---|
-| Throughput | 7,451,970 rows scanned and both grains written in **3.5s** (2.1M rows/s) |
-| Reconciliation | wide grain matches `projectviews` on **all 1,955 domain codes**, zero mismatches, identical total (19,322,047) |
-| Cross-check | dump `en` equals the AQS API value for the same hour, to the view |
-| Idempotency | two full runs of one hour → 1 object per partition, 379 company rows, 5,138 views, both times |
-| Integrity | 7,451,970 lines parsed, **0 malformed** |
-| Compression | 62 MB gzip → 236 MB (3.6x); bronze output 23 KB total |
-| dbt | 7 models, 24 schema tests, 1 reconciliation test — **31/31 pass** in 0.9s |
-| Model idempotency | rebuilding the incremental fact table leaves 1,201 rows and 15,372 views unchanged |
-| Replay | bronze regenerated from raw in object storage in **4s/hour**, no re-download |
-
 ### Storage lifecycle
-
-Nothing is deleted implicitly; retention is an explicit policy enforced by its own DAG.
 
 | Layer | Per hour | Retention | Steady state |
 |---|---|---|---|
 | Raw `.gz` | 45–70 MB | 7 days | ~10 GB |
-| Bronze Parquet | ~100–300 KB | indefinite | ~2 GB/year |
-| Gold marts | small | indefinite | < 1 GB/year |
+| Bronze Parquet | tens of KB | indefinite | well under 1 GB/year |
+| Marts | small | indefinite | < 1 GB/year |
 
-The 7-day raw window is the **replay budget**: a bug in parsing or filtering can be fixed and
-all affected hours reprocessed without re-downloading anything.
+The 7-day raw window is the **replay budget**: a parsing bug can be fixed and every
+affected hour reprocessed from object storage — measured at about 4 seconds an hour —
+without re-downloading.
+
+---
+
+## At 100× the volume
+
+What would change, in the order it would break:
+
+1. **The source's connection limit, first.** Compute isn't the constraint; downloading is,
+   and Wikimedia allows 3 connections. A year of history is 8,760 hours at ~20 s each on
+   2 slots — about a day today, and download-bound at any larger file size. More workers
+   would not help; a mirror or a bulk export would.
+2. **gzip decompression.** A `.gz` stream can't be split, so each file decompresses on one
+   core however many DuckDB has. Files 100× larger would take minutes each — still inside
+   the hour, but with shrinking headroom.
+3. **The single-writer warehouse.** DuckDB allows one writer. One transform DAG is fine;
+   many concurrent writers are not. The marts would move to a server warehouse; because
+   dbt builds them, most of the model layer would move with an adapter change.
+4. **The executor.** LocalExecutor runs everything on one node. Hundreds of DAGs would need
+   Celery or Kubernetes executors.
+
+What would *not* need to change: the partition-as-watermark design, idempotent overwrites,
+the reconciliation test, and the retention policy all scale unchanged. Moving MinIO to S3
+is a configuration change.
 
 ---
 
 ## Running it
 
-**Prerequisites:** Docker Desktop with at least 8 GB allocated, and [uv](https://docs.astral.sh/uv/).
-Airflow itself is never installed locally — it only runs in containers.
+**Prerequisites:** Docker Desktop with at least 8 GB allocated, and
+[uv](https://docs.astral.sh/uv/). Airflow is never installed locally; it runs in containers.
 
 ```bash
 uv sync --all-groups     # local dev environment (Python 3.12)
-make up                  # build and start the stack
+make up                  # build (if anything changed) and start the stack
 ```
 
-On Windows, use `.\make.ps1 <target>` instead of `make <target>` — GNU Make is not installed
-by default there. Both runners expose identical targets; run either with no arguments to list
-them.
+On Windows, use `.\make.ps1 <target>`; both runners expose the same targets.
 
-| | |
+| Service | Address |
 |---|---|
-| Airflow UI | http://localhost:8080 (`airflow` / `airflow`) |
-| MinIO console | http://localhost:9001 |
+| Airflow UI | <http://localhost:8080> (`airflow` / `airflow`) |
+| Dashboard | <http://localhost:8501> |
+| MinIO console | <http://localhost:9001> |
+
+All ports bind to `127.0.0.1` only; the development credentials are not exposed to the
+local network.
 
 ### Tests
 
 ```bash
-make test             # unit tests, local, no containers (fast)
-make test-container   # DAG integrity + integration tests, in the container
-make check            # lint + types + unit tests, i.e. what CI runs
+make test             # unit tests, local, no containers
+make test-container   # DAG integrity, integration, and "is dbt really installed" checks
+make check            # lint + types + unit tests — what CI runs first
 ```
 
-The split is deliberate. `src/wikiflow/` has no Airflow imports, so its tests run locally in
-milliseconds — including on Windows, where Airflow does not install cleanly. Tests that
-genuinely need a scheduler run in the container instead, which is also what CI does.
+`src/wikiflow` has no Airflow imports, so most tests run locally in about 2 seconds,
+including on Windows. Tests that need Airflow run in the container, as they do in CI.
+
+When something goes wrong, [`docs/RUNBOOK.md`](docs/RUNBOOK.md) maps each alert to the
+command that fixes it.
 
 ---
 
 ## Roadmap
 
-- [x] **Phase 0** — Foundation: containerized stack, quality gates, CI
-- [x] **Phase 1** — Ingestion: sensor, verified download, two-grain extraction, idempotent partitions
-- [x] **Phase 2** — Modeling: dbt staging and marts, star schema, reconciliation test
-- [x] **Phase 3** — Operations: audit table, quality gates, retention DAG, runbook
-- [ ] **Phase 4** — Presentation: dashboard, benchmarks, failure drills
-- [ ] **Phase 5** — Depth: Postgres warehouse behind the same interface, redirect resolution
+- [x] **Phase 0** — Foundation: containerised stack, quality gates, CI
+- [x] **Phase 1** — Ingestion: verified download, two-grain extraction, idempotent partitions
+- [x] **Phase 2** — Modelling: dbt staging and marts, exact reconciliation test
+- [x] **Phase 3** — Operations: audit trail, quality checks, retention, runbook
+- [x] **Phase 4** — Presentation: dashboard, benchmark, incident write-up and failure drills
+- [ ] **Phase 5** — Depth: a server warehouse as a second dbt target, redirect resolution
 
 ---
 
 ## What this is not
 
-Worth stating plainly, since the architecture above could imply more than is here:
-
-- It is single-node. There is no horizontal scaling story and none is claimed.
-- There are no SLAs, no on-call rotation, and alerting is a webhook rather than a real
-  paging integration.
-- Retention is time-based only; there is no tiered archival to cold storage.
-- The company view counts **undercount** by design until redirect resolution lands in Phase 5
-  — pageviews are recorded against the title requested, so redirects to a canonical article
-  are counted separately and are not yet folded in.
+- **Single-node.** No horizontal scaling is claimed.
+- **Not production-alerted.** Alerting is a best-effort webhook, with no paging or SLAs.
+- **An undercount, by design.** Pageviews are recorded against the title requested, so
+  views arriving through redirects to a company article are not yet folded in (Phase 5).
+- **Two days of data.** The seasonality-aware volume check needs at least three days of
+  history, and says so rather than guessing.
 
 ---
 
@@ -179,13 +232,5 @@ Worth stating plainly, since the architecture above could imply more than is her
 Pageviews data is published by the Wikimedia Foundation under
 [CC0](https://creativecommons.org/publicdomain/zero/1.0/) at
 [dumps.wikimedia.org](https://dumps.wikimedia.org/other/pageviews/). Requests identify
-themselves with a descriptive `User-Agent` as Wikimedia asks of automated clients.
-
----
-
-## Development workflow
-
-Single-developer project, but `main` is never committed to directly: work goes through
-a pull request with green CI, so `main` stays a sequence of completed, verified changes
-and each PR carries the evidence for its change. See
-[docs/WORKFLOW.md](docs/WORKFLOW.md), and run `make hooks` once after cloning.
+themselves with a descriptive `User-Agent`, as Wikimedia asks of automated clients, and
+stay within its published connection limit.
