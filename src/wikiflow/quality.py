@@ -164,6 +164,7 @@ def detect_volume_anomalies(
     sigma_threshold: float = 4.0,
     min_history: int = 3,
     connection: duckdb.DuckDBPyConnection | None = None,
+    source: str | None = None,
 ) -> AnomalyReport:
     """Flag hours whose total views deviate from the same hour on other days.
 
@@ -174,6 +175,9 @@ def detect_volume_anomalies(
     `min_history` is the number of other days required before an hour is judged at all.
     With less than that, the report says so instead of inventing a threshold from two
     points - a standard deviation over two samples is not a useful signal.
+
+    `source` overrides where to read from, so the logic can be tested against local
+    parquet without object storage.
     """
     settings = get_settings()
     owns = connection is None
@@ -181,14 +185,13 @@ def detect_volume_anomalies(
     if owns:
         configure_duckdb_s3(connection)
 
+    location = source or (f"s3://{settings.lake_bucket}/bronze/domain_totals/dt=*/hour=*/*.parquet")
+
     try:
         rows = connection.execute(
             f"""
             SELECT dt, hour, sum(views)::BIGINT AS views
-            FROM read_parquet(
-                's3://{settings.lake_bucket}/bronze/domain_totals/dt=*/hour=*/*.parquet',
-                hive_partitioning = false
-            )
+            FROM read_parquet('{location}', hive_partitioning = false)
             GROUP BY dt, hour
             ORDER BY dt, hour
             """

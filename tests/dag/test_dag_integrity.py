@@ -151,3 +151,83 @@ def test_ingest_and_transform_agree_on_the_asset_uri(dagbag) -> None:
 def test_transform_dag_runs_one_at_a_time(dagbag) -> None:
     """Concurrent dbt runs would contend for the same DuckDB file for no benefit."""
     assert dagbag.dags["pageviews_transform"].max_active_runs == 1
+
+
+# ---------------------------------------------------------------- ops DAGs
+
+
+@pytest.mark.dag
+def test_all_expected_dags_exist(dagbag) -> None:
+    assert set(dagbag.dags) == {
+        "pageviews_ingest",
+        "pageviews_transform",
+        "pageviews_quality",
+        "raw_retention",
+    }
+
+
+@pytest.mark.dag
+def test_retention_is_a_separate_dag_from_ingestion(dagbag) -> None:
+    """Retention must not be a cleanup task inside the ingest DAG.
+
+    Backfill runs execute out of chronological order, so a cleanup task running inside
+    a backfill of an old hour could delete data a later run still needs. Decoupling
+    them makes retention depend on wall-clock time only, which is what the policy is.
+    """
+    ingest_tasks = set(dagbag.dags["pageviews_ingest"].task_dict)
+
+    assert not any("reten" in t or "cleanup" in t or "purge" in t for t in ingest_tasks)
+    assert "raw_retention" in dagbag.dags
+
+
+@pytest.mark.dag
+def test_retention_plans_before_it_deletes(dagbag) -> None:
+    """The destructive task must run after the dry run that logs the manifest."""
+    dag = dagbag.dags["raw_retention"]
+
+    plan = dag.get_task("plan")
+    apply_task = dag.get_task("apply")
+
+    assert "apply" in plan.downstream_task_ids
+    assert "plan" in apply_task.upstream_task_ids
+
+
+@pytest.mark.dag
+def test_ops_dags_alert_on_failure(dagbag) -> None:
+    """An ops DAG that fails silently is worse than no ops DAG."""
+    for dag_id in ("raw_retention", "pageviews_quality"):
+        dag = dagbag.dags[dag_id]
+        assert dag.default_args.get("on_failure_callback") is not None, dag_id
+
+
+@pytest.mark.dag
+def test_quality_dag_reports_all_checks_together(dagbag) -> None:
+    """Failing on the first problem turns one incident into three.
+
+    The report task must depend on every check, so a single run surfaces all of them.
+    """
+    dag = dagbag.dags["pageviews_quality"]
+    report = dag.get_task("report")
+
+    assert report.upstream_task_ids == {"check_gaps", "check_fresh", "check_volume"}
+
+
+@pytest.mark.dag
+def test_quality_freshness_threshold_exceeds_publication_lag(dagbag) -> None:
+    """Measured worst-case lag is ~3h50m past the end of the covered interval.
+
+    A threshold below that alerts during healthy operation, which trains people to
+    ignore the alert.
+    """
+    # dags/ is not on sys.path under Airflow 3.3's bundle loader (which is why shared
+    # code lives in src/wikiflow_airflow). A DAG module can still be imported directly
+    # by adding the folder for the duration of this assertion.
+    import sys
+
+    sys.path.insert(0, str(DAG_FOLDER))
+    try:
+        import pageviews_quality as module
+    finally:
+        sys.path.remove(str(DAG_FOLDER))
+
+    assert module.FRESHNESS_THRESHOLD.total_seconds() >= 4 * 3600
