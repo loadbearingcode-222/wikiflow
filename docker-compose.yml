@@ -122,6 +122,13 @@ services:
     <<: *airflow-common
     # Runs as root so it can fix ownership of the bind-mounted logs/ directory.
     user: "0:0"
+    environment:
+      <<: *airflow-common-env
+      # Airflow is pip-installed into /home/airflow/.local. As root, `~/.local`
+      # resolves to /root/.local instead, so the `airflow` entrypoint script is found
+      # but importing the package fails. Pinning HOME points site-packages discovery
+      # back at the airflow user's install.
+      HOME: /home/airflow
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |

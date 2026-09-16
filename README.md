@@ -5,7 +5,7 @@ An hourly incremental data pipeline over Wikimedia pageviews, built to answer on
 > How does public attention to the five largest tech companies move hour by hour, across
 > every language edition of Wikipedia — and what share of all Wikipedia traffic is it?
 
-**Status:** Phase 0 complete (foundation). Phase 1 (ingestion) in progress. See [Roadmap](#roadmap).
+**Status:** Phases 0-1 complete - the pipeline ingests a real hour end to end, idempotently. See [Roadmap](#roadmap).
 
 ---
 
@@ -52,7 +52,7 @@ The reasoning behind each is in [`docs/adr/`](docs/adr/). The short version:
 ```
 dumps.wikimedia.org  (hourly .gz, immutable)
       │
-      ▼   deferrable availability sensor (10-min poke, 5h timeout)
+      ▼   availability sensor, reschedule mode (10-min poke, 5h timeout)
    download → verify → upload raw bytes
       │
       ▼   RAW  (immutable, 7-day retention)
@@ -60,8 +60,8 @@ dumps.wikimedia.org  (hourly .gz, immutable)
       │
       ▼   DuckDB reads the .gz from MinIO — ONE scan, TWO outputs
    BRONZE  (kept indefinitely)
-     ├── company_pageviews   ~200-600 rows/hr   the detailed fact grain
-     └── domain_totals       ~1,400 rows/hr     the denominator + reconciliation key
+     ├── company_pageviews     379 rows/hr    the detailed fact grain
+     └── domain_totals       1,955 rows/hr    the denominator + reconciliation key
       │
       ▼   dbt-duckdb
    SILVER → GOLD   dim_company, dim_project, fct_company_pageviews_hourly,
@@ -70,6 +70,19 @@ dumps.wikimedia.org  (hourly .gz, immutable)
       ▼
    Streamlit dashboard + freshness panel
 ```
+
+### Verified behaviour
+
+Measured against the live source, not asserted:
+
+| | |
+|---|---|
+| Throughput | 7,451,970 rows scanned and both grains written in **3.5s** (2.1M rows/s) |
+| Reconciliation | wide grain matches `projectviews` on **all 1,955 domain codes**, zero mismatches, identical total (19,322,047) |
+| Cross-check | dump `en` equals the AQS API value for the same hour, to the view |
+| Idempotency | two full runs of one hour → 1 object per partition, 379 company rows, 5,138 views, both times |
+| Integrity | 7,451,970 lines parsed, **0 malformed** |
+| Compression | 62 MB gzip → 236 MB (3.6x); bronze output 23 KB total |
 
 ### Storage lifecycle
 
@@ -122,7 +135,7 @@ genuinely need a scheduler run in the container instead, which is also what CI d
 ## Roadmap
 
 - [x] **Phase 0** — Foundation: containerized stack, quality gates, CI
-- [ ] **Phase 1** — Ingestion: sensor, verified download, two-grain extraction, idempotent partitions
+- [x] **Phase 1** — Ingestion: sensor, verified download, two-grain extraction, idempotent partitions
 - [ ] **Phase 2** — Modeling: dbt staging and marts, star schema, reconciliation test
 - [ ] **Phase 3** — Operations: audit table, quality gates, retention DAG, runbook
 - [ ] **Phase 4** — Presentation: dashboard, benchmarks, failure drills

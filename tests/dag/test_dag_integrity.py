@@ -21,7 +21,9 @@ DAG_FOLDER = Path("/opt/airflow/dags")
 def dagbag():
     from airflow.models import DagBag
 
-    return DagBag(dag_folder=str(DAG_FOLDER), include_examples=False)
+    # Airflow 3.3 dropped the include_examples argument; example DAGs are
+    # controlled by AIRFLOW__CORE__LOAD_EXAMPLES, which compose sets to false.
+    return DagBag(dag_folder=str(DAG_FOLDER))
 
 
 @pytest.mark.dag
@@ -70,7 +72,12 @@ def test_ingest_dag_is_hourly(dagbag) -> None:
     at runtime - this makes it fail at test time instead.
     """
     dag = dagbag.dags["pageviews_ingest"]
-    assert str(dag.schedule_interval) in {"@hourly", "0 * * * *", "1:00:00"}, dag.schedule_interval
+
+    # Airflow 3 exposes `schedule` and a resolved `timetable`; `schedule_interval` is
+    # gone. Assert on the timetable, since that is what the scheduler actually uses -
+    # `schedule` is only the string that was passed in.
+    assert str(dag.schedule) == "@hourly"
+    assert dag.timetable.expression == "0 * * * *", dag.timetable
 
 
 @pytest.mark.dag
@@ -88,10 +95,9 @@ def test_sensor_timeout_covers_observed_publication_lag(dagbag) -> None:
 
 @pytest.mark.dag
 def test_ingest_dag_has_no_cycles(dagbag) -> None:
-    from airflow.utils.dag_cycle_tester import check_cycle
-
+    # dag.check_cycle() replaces the deprecated airflow.utils.dag_cycle_tester.
     for dag in dagbag.dags.values():
-        check_cycle(dag)
+        dag.check_cycle()
 
 
 @pytest.mark.dag

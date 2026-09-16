@@ -55,6 +55,8 @@ jobs:
         run: docker compose build airflow-scheduler
 
       - name: DAG + integration tests
+        # --entrypoint is required: the Airflow image entrypoint treats a bare
+        # command as an `airflow` subcommand and prints CLI help instead.
         run: >
-          docker compose run --rm --no-deps airflow-scheduler
-          pytest /opt/airflow/tests -m "dag or integration" -ra
+          docker compose run --rm --no-deps --entrypoint pytest airflow-scheduler
+          /opt/airflow/tests -m "dag or integration" -ra

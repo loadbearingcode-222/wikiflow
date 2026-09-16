@@ -54,7 +54,9 @@ test:  ## Run unit tests locally (fast, no containers)
 	uv run pytest tests/unit -m unit
 
 test-container:  ## Run DAG + integration tests inside the container
-	$(COMPOSE) run --rm --no-deps airflow-scheduler pytest /opt/airflow/tests -m "dag or integration"
+	# --entrypoint is required: the Airflow image entrypoint treats a bare command
+	# as an `airflow` subcommand and would print the CLI help instead of running it.
+	$(COMPOSE) run --rm --no-deps --entrypoint pytest airflow-scheduler /opt/airflow/tests -m "dag or integration"
 
 lint:  ## Check formatting and lint rules
 	uv run ruff check .

@@ -76,7 +76,7 @@ switch ($Target.ToLowerInvariant()) {
     'shell'   { Compose @('exec', 'airflow-scheduler', 'bash') }
 
     'test'           { Uv @('run', 'pytest', 'tests/unit', '-m', 'unit') }
-    'test-container' { Compose @('run', '--rm', '--no-deps', 'airflow-scheduler', 'pytest', '/opt/airflow/tests', '-m', 'dag or integration') }
+    'test-container' { Compose @('run', '--rm', '--no-deps', '--entrypoint', 'pytest', 'airflow-scheduler', '/opt/airflow/tests', '-m', 'dag or integration') }
 
     'lint'      { Uv @('run', 'ruff', 'check', '.'); Uv @('run', 'ruff', 'format', '--check', '.') }
     'format'    { Uv @('run', 'ruff', 'check', '--fix', '.'); Uv @('run', 'ruff', 'format', '.') }
