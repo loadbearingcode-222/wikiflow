@@ -47,6 +47,9 @@ The reasoning behind each is in [`docs/adr/`](docs/adr/). The short version:
 | Domain-code parsing in Python, not a dbt macro | `.m` means three different things depending on position; two implementations would drift. Affordable because it runs on the aggregated grain (~1,955 codes), not per row | Re-deriving it in SQL, which is the obvious choice and the wrong one |
 | dbt in its own virtualenv | dbt-core and Airflow both pin jinja2, click and protobuf; one environment breaks at runtime rather than install time | Installing dbt alongside Airflow, or a separate dbt container via DockerOperator |
 | Asset-triggered transforms | Source publication latency varies by ~90 minutes, so any cron offset is wrong in one direction | A scheduled transform DAG, or a cross-DAG sensor |
+| Audit is append-only, data is overwrite | A partition that failed twice before succeeding should keep all three records; overwriting erases the history you want during an incident | Recording only the latest attempt, or only successes |
+| Anomaly check compares the same hour across days | Traffic swings ~1.6x daily, so an hour-over-hour check fires every dawn and dusk until people stop reading it | Comparing against the previous hour, or a fixed row-count floor |
+| Retention is its own DAG | Backfill runs execute out of order, so a cleanup task inside ingestion could delete data a later run still needs | A cleanup task at the end of the ingest DAG |
 
 ---
 
@@ -76,6 +79,10 @@ dumps.wikimedia.org  (hourly .gz, immutable)
       │
       ▼
    Streamlit dashboard + freshness panel
+
+   ── independent ops DAGs ──
+   pageviews_quality   hourly: gaps, freshness, volume anomalies
+   raw_retention       daily : dry-run manifest, then delete past the window
 ```
 
 ### Verified behaviour
@@ -147,7 +154,7 @@ genuinely need a scheduler run in the container instead, which is also what CI d
 - [x] **Phase 0** — Foundation: containerized stack, quality gates, CI
 - [x] **Phase 1** — Ingestion: sensor, verified download, two-grain extraction, idempotent partitions
 - [x] **Phase 2** — Modeling: dbt staging and marts, star schema, reconciliation test
-- [ ] **Phase 3** — Operations: audit table, quality gates, retention DAG, runbook
+- [x] **Phase 3** — Operations: audit table, quality gates, retention DAG, runbook
 - [ ] **Phase 4** — Presentation: dashboard, benchmarks, failure drills
 - [ ] **Phase 5** — Depth: Postgres warehouse behind the same interface, redirect resolution
 

@@ -18,20 +18,22 @@ service, and keeps partition writes effectively serial.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pendulum
 from airflow.providers.standard.sensors.python import PythonSensor
-from airflow.sdk import dag, task
+from airflow.sdk import dag, get_current_context, task
 
+from wikiflow.audit import IngestionAudit, write_audit
 from wikiflow.config import get_settings
-from wikiflow.download import download_dump
-from wikiflow.extract import extract_hour
+from wikiflow.download import DownloadResult, download_dump
+from wikiflow.extract import ExtractionResult, extract_hour
 from wikiflow.source import HourlyDump
 from wikiflow.storage import overwrite_partition
 from wikiflow.wikidata import CompanyPage, load_companies, resolve_company_pages
@@ -64,6 +66,56 @@ def _dump_is_published(url: str) -> bool:
         # Transient network trouble. Treat as "not yet" and poke again.
         return False
     return response.status_code == 200
+
+
+log = logging.getLogger(__name__)
+
+
+def _record_audit(
+    *,
+    dump: HourlyDump,
+    started_at: datetime,
+    status: str,
+    error: str | None,
+    downloaded: DownloadResult | None,
+    extracted: ExtractionResult | None,
+) -> None:
+    """Persist one audit row. Never raises.
+
+    Called from a `finally`, so an exception here would replace the real failure with
+    an audit-writing failure - hiding the thing the record exists to explain.
+    """
+    try:
+        context = get_current_context()
+        task_instance = context.get("ti")
+        record = IngestionAudit(
+            run_id=str(context.get("run_id", "unknown")),
+            dag_id="pageviews_ingest",
+            task_id="ingest",
+            try_number=int(getattr(task_instance, "try_number", 1) or 1),
+            interval_start=dump.interval_start,
+            partition_date=dump.partition_date,
+            partition_hour=int(dump.partition_hour),
+            source_url=dump.pageviews_url,
+            status=status,
+            error=error,
+            compressed_bytes=downloaded.compressed_bytes if downloaded else 0,
+            decompressed_bytes=downloaded.decompressed_bytes if downloaded else 0,
+            line_count=downloaded.line_count if downloaded else 0,
+            sha256=downloaded.sha256 if downloaded else "",
+            rows_scanned=extracted.rows_scanned if extracted else 0,
+            rows_malformed=extracted.rows_malformed if extracted else 0,
+            company_rows=extracted.company_rows if extracted else 0,
+            company_views=extracted.company_views if extracted else 0,
+            domain_rows=extracted.domain_rows if extracted else 0,
+            total_views=extracted.total_views if extracted else 0,
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+        )
+        key = write_audit(record, dump)
+        log.info("audit record written: %s (status=%s)", key, status)
+    except Exception:
+        log.exception("could not write the audit record; continuing")
 
 
 @dag(
@@ -128,69 +180,93 @@ def pageviews_ingest() -> None:
 
     @task
     def ingest(spec: dict[str, str], filter_rows: list[dict[str, Any]]) -> dict[str, Any]:
-        """Download, verify, land raw, extract both grains, publish bronze."""
+        """Download, verify, land raw, extract both grains, publish bronze.
+
+        Writes an audit record on the way out whether or not it succeeded. A failed
+        attempt is exactly the case the audit table exists for, so recording only
+        successes would leave the table useless during an incident.
+        """
         settings = get_settings()
         dump = HourlyDump.for_interval(pendulum.parse(spec["interval_start"]))
         pages = [CompanyPage(**row) for row in filter_rows]
 
-        # Scratch only. Object storage is the durable location; anything written to
-        # the worker's local disk disappears when the container restarts.
-        with tempfile.TemporaryDirectory(prefix="wikiflow-ingest-") as tmpdir:
-            workdir = Path(tmpdir)
+        started_at = datetime.now(UTC)
+        downloaded: DownloadResult | None = None
+        extracted: ExtractionResult | None = None
+        status, error = "failed", None
 
-            downloaded = download_dump(dump.pageviews_url, workdir / dump.pageviews_filename)
+        try:
+            # Scratch only. Object storage is the durable location; anything written
+            # to the worker's local disk disappears when the container restarts.
+            with tempfile.TemporaryDirectory(prefix="wikiflow-ingest-") as tmpdir:
+                workdir = Path(tmpdir)
 
-            # Land the bytes exactly as received, before any parsing.
-            overwrite_partition(
-                downloaded.path,
-                bucket=settings.raw_bucket,
-                partition_prefix=f"pageviews/{dump.partition_path}/",
-                key=dump.raw_key("pageviews"),
-            )
+                downloaded = download_dump(dump.pageviews_url, workdir / dump.pageviews_filename)
 
-            projectviews = download_dump(
-                dump.projectviews_url,
-                workdir / dump.projectviews_filename,
-                compressed=False,
-            )
-            overwrite_partition(
-                projectviews.path,
-                bucket=settings.raw_bucket,
-                partition_prefix=f"projectviews/{dump.partition_path}/",
-                key=dump.raw_key("projectviews"),
-            )
-
-            extracted = extract_hour(
-                source=str(downloaded.path),
-                dump=dump,
-                company_pages=pages,
-                output_dir=workdir / "bronze",
-                expected_lines=downloaded.line_count,
-            )
-
-            for grain, path in (
-                ("company_pageviews", extracted.company_path),
-                ("domain_totals", extracted.domain_path),
-            ):
-                prefix = f"bronze/{grain}/{dump.partition_path}/"
+                # Land the bytes exactly as received, before any parsing.
                 overwrite_partition(
-                    path,
-                    bucket=settings.lake_bucket,
-                    partition_prefix=prefix,
-                    key=f"{prefix}part-0.parquet",
+                    downloaded.path,
+                    bucket=settings.raw_bucket,
+                    partition_prefix=f"pageviews/{dump.partition_path}/",
+                    key=dump.raw_key("pageviews"),
                 )
 
-        return {
-            "partition": dump.partition_path,
-            "compressed_bytes": downloaded.compressed_bytes,
-            "sha256": downloaded.sha256,
-            "rows_scanned": extracted.rows_scanned,
-            "rows_malformed": extracted.rows_malformed,
-            "company_rows": extracted.company_rows,
-            "company_views": extracted.company_views,
-            "domain_rows": extracted.domain_rows,
-            "total_views": extracted.total_views,
-        }
+                projectviews = download_dump(
+                    dump.projectviews_url,
+                    workdir / dump.projectviews_filename,
+                    compressed=False,
+                )
+                overwrite_partition(
+                    projectviews.path,
+                    bucket=settings.raw_bucket,
+                    partition_prefix=f"projectviews/{dump.partition_path}/",
+                    key=dump.raw_key("projectviews"),
+                )
+
+                extracted = extract_hour(
+                    source=str(downloaded.path),
+                    dump=dump,
+                    company_pages=pages,
+                    output_dir=workdir / "bronze",
+                    expected_lines=downloaded.line_count,
+                )
+
+                for grain, path in (
+                    ("company_pageviews", extracted.company_path),
+                    ("domain_totals", extracted.domain_path),
+                ):
+                    prefix = f"bronze/{grain}/{dump.partition_path}/"
+                    overwrite_partition(
+                        path,
+                        bucket=settings.lake_bucket,
+                        partition_prefix=prefix,
+                        key=f"{prefix}part-0.parquet",
+                    )
+
+            status = "success"
+            return {
+                "partition": dump.partition_path,
+                "compressed_bytes": downloaded.compressed_bytes,
+                "sha256": downloaded.sha256,
+                "rows_scanned": extracted.rows_scanned,
+                "rows_malformed": extracted.rows_malformed,
+                "company_rows": extracted.company_rows,
+                "company_views": extracted.company_views,
+                "domain_rows": extracted.domain_rows,
+                "total_views": extracted.total_views,
+            }
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            _record_audit(
+                dump=dump,
+                started_at=started_at,
+                status=status,
+                error=error,
+                downloaded=downloaded,
+                extracted=extracted,
+            )
 
     @task(outlets=[BRONZE_COMPANY_PAGEVIEWS, BRONZE_DOMAIN_TOTALS])
     def verify(stats: dict[str, Any]) -> dict[str, Any]:
