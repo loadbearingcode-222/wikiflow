@@ -23,13 +23,20 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx
 
 from wikiflow.config import get_settings
+
+log = logging.getLogger(__name__)
 
 _CHUNK = 1024 * 1024
 
@@ -56,44 +63,194 @@ class DownloadResult:
         return self.decompressed_bytes / self.compressed_bytes
 
 
-def download_dump(url: str, destination: Path, *, compressed: bool = True) -> DownloadResult:
-    """Stream `url` to `destination` and verify it.
+#: Worth retrying: rate limiting and server-side trouble. Any other 4xx - a 404 above
+#: all - means the request itself is wrong, and repeating it changes nothing.
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+MAX_ATTEMPTS = 5
+BASE_BACKOFF_SECONDS = 10.0
+
+#: The longest this function will sleep between attempts. If the server asks for a
+#: longer wait than this via Retry-After, the download gives up and leaves the retry to
+#: Airflow's own task-level backoff, rather than shortening the wait the server asked
+#: for. dumps.wikimedia.org caps clients at 3 connections per IP and states that
+#: clients trying to evade its limits may be blocked.
+MAX_BACKOFF_SECONDS = 300.0
+
+
+class _RetryableFailure(Exception):
+    """An attempt failed in a way a later attempt might not."""
+
+    def __init__(self, cause: Exception, retry_after: float | None = None) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.retry_after = retry_after
+
+
+def download_dump(
+    url: str,
+    destination: Path,
+    *,
+    compressed: bool = True,
+    client: httpx.Client | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    max_attempts: int = MAX_ATTEMPTS,
+) -> DownloadResult:
+    """Stream `url` to `destination` and verify it, retrying transient failures.
+
+    Retries cover three things observed against the real source: `429 Too Many
+    Requests`, connections closed mid-body (one attempt received 15 MB of a 52 MB file
+    before the peer hung up), and 5xx errors. Each retry re-downloads from scratch - the
+    destination is truncated on open, so a partial body from a failed attempt can never
+    be mistaken for data.
 
     Args:
         url: The dump URL.
         destination: Local path to stream into. Treat it as scratch - the caller is
             responsible for deleting it, normally in a `finally`.
         compressed: False for `projectviews` files, which are published uncompressed.
+        client: An httpx client to use instead of creating one. Mainly for tests.
+        sleep: Called between attempts. Injected so tests do not actually wait.
+        max_attempts: Total attempts, including the first.
 
     Raises:
-        DownloadVerificationError: if any integrity check fails.
-        httpx.HTTPStatusError: on a non-2xx response.
+        DownloadVerificationError: if every attempt fails an integrity check.
+        httpx.HTTPStatusError: on a non-retryable status, or a retryable one that
+            persisted through every attempt.
+        httpx.TransportError: if the connection kept failing.
     """
     settings = get_settings()
     destination.parent.mkdir(parents=True, exist_ok=True)
 
+    owns_client = client is None
+    client = client or httpx.Client(
+        headers={"User-Agent": settings.user_agent},
+        timeout=settings.request_timeout_seconds,
+        follow_redirects=True,
+    )
+
+    try:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return _download_once(client, url, destination, compressed=compressed)
+            except _RetryableFailure as failure:
+                delay = _backoff_seconds(attempt, failure.retry_after)
+                out_of_attempts = attempt == max_attempts
+                wait_too_long = delay > MAX_BACKOFF_SECONDS
+
+                if out_of_attempts or wait_too_long:
+                    reason = (
+                        f"gave up after {attempt} attempt(s)"
+                        if out_of_attempts
+                        else f"server asked to wait {delay:.0f}s, longer than this "
+                        "function will; deferring to the task-level retry"
+                    )
+                    failure.cause.add_note(reason)
+                    raise failure.cause from None
+
+                log.warning(
+                    "attempt %d/%d for %s failed (%s); retrying in %.0fs",
+                    attempt,
+                    max_attempts,
+                    url,
+                    failure.cause,
+                    delay,
+                )
+                sleep(delay)
+
+        raise AssertionError("unreachable: the loop always returns or raises")
+    finally:
+        if owns_client:
+            client.close()
+
+
+def _backoff_seconds(attempt: int, retry_after: float | None) -> float:
+    """How long to wait before the next attempt.
+
+    A server-supplied Retry-After is honoured exactly rather than blended with local
+    backoff - it is the server saying how long it needs, and that is the number that
+    avoids a second 429. Otherwise exponential: 10s, 20s, 40s, 80s.
+    """
+    if retry_after is not None:
+        return retry_after
+    return BASE_BACKOFF_SECONDS * float(2 ** (attempt - 1))
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Parse Retry-After, which may be delta-seconds or an HTTP date."""
+    value = response.headers.get("retry-after")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
+def _download_once(
+    client: httpx.Client, url: str, destination: Path, *, compressed: bool
+) -> DownloadResult:
+    """One attempt. Raises _RetryableFailure for anything a retry might fix."""
     digest = hashlib.sha256()
     written = 0
     declared_length: int | None = None
 
-    with (
-        httpx.Client(
-            headers={"User-Agent": settings.user_agent},
-            timeout=settings.request_timeout_seconds,
-            follow_redirects=True,
-        ) as client,
-        client.stream("GET", url) as response,
-    ):
-        response.raise_for_status()
+    try:
+        with client.stream("GET", url) as response:
+            if response.status_code in RETRYABLE_STATUS:
+                error = httpx.HTTPStatusError(
+                    f"Client error '{response.status_code} {response.reason_phrase}' "
+                    f"for url '{url}'",
+                    request=response.request,
+                    response=response,
+                )
+                raise _RetryableFailure(error, _retry_after_seconds(response))
 
-        if (header := response.headers.get("content-length")) is not None:
-            declared_length = int(header)
+            # Anything else non-2xx is permanent and raises straight through.
+            response.raise_for_status()
 
-        with destination.open("wb") as handle:
-            for chunk in response.iter_bytes(_CHUNK):
-                handle.write(chunk)
-                digest.update(chunk)
-                written += len(chunk)
+            if (header := response.headers.get("content-length")) is not None:
+                declared_length = int(header)
+
+            # "wb" truncates, so a previous attempt's partial body cannot survive.
+            with destination.open("wb") as handle:
+                for chunk in response.iter_bytes(_CHUNK):
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    written += len(chunk)
+    except httpx.TransportError as exc:
+        # Includes RemoteProtocolError (peer closed mid-body), timeouts, refused
+        # connections.
+        raise _RetryableFailure(exc) from exc
+
+    try:
+        return _verify(
+            url,
+            destination,
+            compressed=compressed,
+            written=written,
+            declared_length=declared_length,
+            sha256=digest.hexdigest(),
+        )
+    except DownloadVerificationError as exc:
+        # A bad transfer is fixed by transferring again.
+        raise _RetryableFailure(exc) from exc
+
+
+def _verify(
+    url: str,
+    destination: Path,
+    *,
+    compressed: bool,
+    written: int,
+    declared_length: int | None,
+    sha256: str,
+) -> DownloadResult:
 
     # (2) Size check. Cheap, and catches the common truncation case immediately.
     if declared_length is not None and written != declared_length:
@@ -117,7 +274,7 @@ def download_dump(url: str, destination: Path, *, compressed: bool = True) -> Do
         compressed_bytes=written,
         decompressed_bytes=decompressed_bytes,
         line_count=line_count,
-        sha256=digest.hexdigest(),
+        sha256=sha256,
     )
 
 

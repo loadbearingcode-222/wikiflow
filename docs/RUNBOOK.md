@@ -65,6 +65,43 @@ rather than re-running by hand.
 
 ---
 
+## `pageviews_ingest` — `429 Too Many Requests`
+
+**Means:** we exceeded dumps.wikimedia.org's limit of **3 connections per IP**.
+
+This has happened. Five downloads once ran at once: a scheduler backfill, a shell-loop
+backfill that was believed dead but was not, and the hourly schedule. `max_active_runs`
+did not prevent it, because it is per DAG and counts those run types separately.
+
+The `wikimedia_dumps` pool (2 slots) is what bounds this now, across every run type.
+Downloads also retry 429s, waiting exactly as long as `Retry-After` says. If the server
+asks for longer than 5 minutes, the download stops retrying and leaves it to Airflow's
+slower task-level retry rather than shortening the wait.
+
+**Check:**
+
+```bash
+docker compose exec airflow-scheduler airflow pools list          # wikimedia_dumps | 2 ?
+docker compose exec airflow-scheduler airflow dags list-runs -d pageviews_ingest --state running
+```
+
+If the pool is missing, tasks assigned to it will not run at all — recreate it:
+
+```bash
+docker compose exec airflow-scheduler airflow pools set wikimedia_dumps 2 "Connections to dumps.wikimedia.org (cap: 3 per IP)"
+```
+
+**Do not raise the pool above 2.** Wikimedia states that clients evading its limits may
+be blocked, and a block would stop ingestion entirely.
+
+Also check for anything outside the scheduler downloading from the same IP. Pools only
+bound tasks the scheduler runs: `airflow dags test` executes in-process and ignores them.
+That is why backfills go through `airflow backfill create` (see *gaps detected* below)
+and never through a shell loop around `dags test` - the project once had such a script,
+and it was a cause of this incident.
+
+---
+
 ## `pageviews_ingest` — zero company rows
 
 **Symptom:** `verify` raises "produced zero company rows".
@@ -105,8 +142,9 @@ docker compose exec airflow-scheduler airflow backfill create \
   --max-active-runs 2 --reprocess-behavior failed
 ```
 
-`--max-active-runs 2` matches the DAG limit, which exists to be a good citizen toward
-a free public service. Raising it routes around the limit rather than respecting it.
+Load on Wikimedia is bounded by the `wikimedia_dumps` pool, not by this flag — the pool
+holds across backfill, scheduled and manual runs, and this flag does not. `--max-active-runs
+2` just matches the pool, so extra runs are not started only to wait for a slot.
 
 If the gap is older than the 7-day retention window the raw file is gone locally, but
 Wikimedia's dumps are archival — the same backfill works, just with a re-download.
@@ -223,8 +261,11 @@ docker compose exec airflow-scheduler /home/airflow/dbt-venv/bin/dbt build \
 Safe at any time: the marts are derived, and a full refresh is idempotent.
 
 **Re-run one hour end to end.** Safe by construction — every task replaces its
-partition wholesale, so re-running cannot double-count (ADR 0002):
+partition wholesale, so re-running cannot double-count (ADR 0002). Use `airflow dags
+trigger` rather than `airflow dags test`: `dags test` runs in-process and **ignores
+pools**, so it can push the pipeline past Wikimedia's connection cap while anything
+else is running.
 
 ```bash
-docker compose exec airflow-scheduler airflow dags test pageviews_ingest 2026-09-14T11:00:00+00:00
+docker compose exec airflow-scheduler airflow dags trigger pageviews_ingest --logical-date 2026-09-14T11:00:00+00:00
 ```

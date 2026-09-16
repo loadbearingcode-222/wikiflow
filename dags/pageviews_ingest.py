@@ -12,8 +12,11 @@ The incremental contract, in one place:
   append path, so a re-run cannot double-count.
 * Backfill uses this same code. There is no separate backfill script.
 
-`max_active_runs=2` bounds catchup so a long backfill does not hammer a free public
-service, and keeps partition writes effectively serial.
+Load on dumps.wikimedia.org is bounded by the `wikimedia_dumps` pool, not by
+`max_active_runs`. That distinction was learned the hard way: max_active_runs is per DAG
+and counts backfill, scheduled and manual runs separately, so five downloads once ran at
+once against a source that caps clients at 3 connections per IP - and got `429 Too Many
+Requests` for it. See `wikiflow_airflow.pools`.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from wikiflow.source import HourlyDump
 from wikiflow.storage import overwrite_partition
 from wikiflow.wikidata import CompanyPage, load_companies, resolve_company_pages
 from wikiflow_airflow.assets import BRONZE_COMPANY_PAGEVIEWS, BRONZE_DOMAIN_TOTALS
+from wikiflow_airflow.pools import WIKIMEDIA_DUMPS_POOL
 
 COMPANY_SEED = Path("/opt/airflow/seeds/companies.csv")
 
@@ -160,6 +164,10 @@ def pageviews_ingest() -> None:
         # poke. At one DAG and a 10-minute interval that saving is negligible, so the
         # simpler option wins; the triggerer is running if this ever needs upgrading.
         mode="reschedule",
+        # Each poke is a HEAD request to dumps.wikimedia.org, so it counts against the
+        # same 3-connection cap as the downloads. In reschedule mode the slot is only
+        # held for the seconds a poke takes, not for the whole wait.
+        pool=WIKIMEDIA_DUMPS_POOL,
         poke_interval=int(POKE_INTERVAL.total_seconds()),
         timeout=int(SENSOR_TIMEOUT.total_seconds()),
         # A missing hour should fail loudly rather than retry for another 5 hours.
@@ -178,7 +186,10 @@ def pageviews_ingest() -> None:
         # CompanyPage uses slots=True, so it has no __dict__; asdict() is required.
         return [asdict(page) for page in pages]
 
-    @task
+    # Two sequential downloads per task, one connection at a time. The pool - not
+    # max_active_runs - is what bounds concurrent connections across backfill,
+    # scheduled and manual runs together. See wikiflow_airflow.pools.
+    @task(pool=WIKIMEDIA_DUMPS_POOL)
     def ingest(spec: dict[str, str], filter_rows: list[dict[str, Any]]) -> dict[str, Any]:
         """Download, verify, land raw, extract both grains, publish bronze.
 

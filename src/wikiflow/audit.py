@@ -8,9 +8,9 @@ Two design points worth stating, because both differ from how the data partition
 
 **Audit is append-only, data is overwrite.** A partition is replaced wholesale on
 re-run (ADR 0002) so that re-running cannot double-count. Audit rows are the opposite:
-each attempt writes its own file keyed by run id, so a partition that failed twice and
-succeeded on the third try keeps all three records. Overwriting them would erase
-exactly the history you want during an incident.
+each attempt writes its own file keyed by run id and attempt number, so a partition that
+failed twice and succeeded on the third try keeps all three records. Overwriting them
+would erase exactly the history you want during an incident.
 
 **It lives in object storage, not the warehouse.** DuckDB permits a single writer, so
 having the ingest DAG write audit rows into the same file dbt builds marts in would
@@ -90,42 +90,89 @@ class IngestionAudit:
         return row
 
 
-def audit_key(dump: HourlyDump, run_id: str) -> str:
+def audit_key(dump: HourlyDump, run_id: str, try_number: int) -> str:
     """Object key for one audit record.
 
-    Keyed by run id rather than by partition, so retries accumulate instead of
-    overwriting each other.
+    Keyed by run id AND attempt number. Run id alone is not enough: Airflow retries of
+    the same run share a run id, so attempt 2 would overwrite attempt 1 - which is
+    exactly the history the audit table exists to keep. (That is not hypothetical: the
+    first version keyed on run id only, and a partition that failed three times kept
+    only its third record.)
     """
     safe_run_id = "".join(c if c.isalnum() or c in "-_" else "-" for c in run_id)
-    return f"{AUDIT_PREFIX}/{dump.partition_path}/run-{safe_run_id}.parquet"
+    return f"{AUDIT_PREFIX}/{dump.partition_path}/run-{safe_run_id}-try{try_number}.parquet"
+
+
+#: The declared schema of every audit file, in column order.
+#:
+#: Declared rather than inferred, and this is a fix rather than a preference. With
+#: inference, DuckDB types a bare NULL as INTEGER, so a successful run (error=None)
+#: wrote `error INTEGER` while a failed run wrote `error VARCHAR`. Each file was valid on
+#: its own; the glob across them broke the moment the first failure landed - which is
+#: precisely when someone needs to read the audit table.
+AUDIT_SCHEMA: dict[str, str] = {
+    "run_id": "VARCHAR",
+    "dag_id": "VARCHAR",
+    "task_id": "VARCHAR",
+    "try_number": "INTEGER",
+    "interval_start": "TIMESTAMPTZ",
+    "partition_date": "DATE",
+    "partition_hour": "INTEGER",
+    "source_url": "VARCHAR",
+    "status": "VARCHAR",
+    "error": "VARCHAR",
+    "compressed_bytes": "BIGINT",
+    "decompressed_bytes": "BIGINT",
+    "line_count": "BIGINT",
+    "sha256": "VARCHAR",
+    "rows_scanned": "BIGINT",
+    "rows_malformed": "BIGINT",
+    "company_rows": "BIGINT",
+    "company_views": "BIGINT",
+    "domain_rows": "BIGINT",
+    "total_views": "BIGINT",
+    "started_at": "TIMESTAMPTZ",
+    "finished_at": "TIMESTAMPTZ",
+    "duration_seconds": "DOUBLE",
+    "company_share": "DOUBLE",
+}
+
+
+def write_audit_parquet(record: IngestionAudit, path: Path) -> None:
+    """Write one audit row to a local Parquet file with the declared schema."""
+    row = record.as_row()
+    if set(row) != set(AUDIT_SCHEMA):
+        raise ValueError(
+            "audit record fields and AUDIT_SCHEMA have drifted apart: "
+            f"missing from schema {sorted(set(row) - set(AUDIT_SCHEMA))}, "
+            f"missing from record {sorted(set(AUDIT_SCHEMA) - set(row))}"
+        )
+
+    connection = duckdb.connect()
+    try:
+        # DuckDB rejects prepared parameters inside COPY, so the row goes into a temp
+        # table first. Each placeholder is CAST to its declared type, so a None becomes
+        # a NULL of the RIGHT type instead of an INTEGER NULL.
+        casts = ", ".join(f"CAST(? AS {kind}) AS {name}" for name, kind in AUDIT_SCHEMA.items())
+        connection.execute(
+            f"CREATE TEMP TABLE audit_row AS SELECT {casts}",
+            [row[name] for name in AUDIT_SCHEMA],
+        )
+        connection.execute(
+            f"COPY audit_row TO '{path.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+    finally:
+        connection.close()
 
 
 def write_audit(record: IngestionAudit, dump: HourlyDump) -> str:
-    """Persist one audit row as Parquet. Returns the object key written."""
+    """Persist one audit row to object storage. Returns the object key written."""
     settings = get_settings()
-    key = audit_key(dump, record.run_id)
+    key = audit_key(dump, record.run_id, record.try_number)
 
     with tempfile.TemporaryDirectory(prefix="wikiflow-audit-") as tmpdir:
         path = Path(tmpdir) / "audit.parquet"
-        connection = duckdb.connect()
-        try:
-            row = record.as_row()
-            # DuckDB rejects prepared parameters inside COPY, so the row goes into a
-            # temp table first and COPY reads from that. One INSERT of one row is
-            # immaterial here - unlike the 2,238-row filter in extract.py, which had
-            # to avoid INSERT entirely.
-            placeholders = ", ".join("?" for _ in row)
-            connection.execute(
-                f"CREATE TEMP TABLE audit_row AS SELECT * FROM (VALUES ({placeholders})) "
-                f"AS t({', '.join(row)})",
-                list(row.values()),
-            )
-            connection.execute(
-                f"COPY audit_row TO '{path.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-            )
-        finally:
-            connection.close()
-
+        write_audit_parquet(record, path)
         upload_file(path, settings.lake_bucket, key)
 
     return key

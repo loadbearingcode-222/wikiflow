@@ -231,3 +231,47 @@ def test_quality_freshness_threshold_exceeds_publication_lag(dagbag) -> None:
         sys.path.remove(str(DAG_FOLDER))
 
     assert module.FRESHNESS_THRESHOLD.total_seconds() >= 4 * 3600
+
+
+# ---------------------------------------------------------------- source rate limits
+
+
+@pytest.mark.dag
+def test_every_task_that_contacts_wikimedia_is_in_the_pool(dagbag) -> None:
+    """The pool, not max_active_runs, is what bounds load on dumps.wikimedia.org.
+
+    max_active_runs is per DAG and counts backfill, scheduled and manual runs
+    separately; relying on it once let five downloads run at once against a
+    3-connections-per-IP cap, and Wikimedia answered with 429s.
+    """
+    from wikiflow_airflow.pools import WIKIMEDIA_DUMPS_POOL
+
+    dag = dagbag.dags["pageviews_ingest"]
+    for task_id in ("wait_for_publication", "ingest"):
+        assert dag.get_task(task_id).pool == WIKIMEDIA_DUMPS_POOL, task_id
+
+
+@pytest.mark.dag
+def test_pool_is_created_below_the_documented_connection_cap() -> None:
+    """The pool is created by airflow-init; that command and the constants must agree.
+
+    If they drift, tasks either queue forever against a pool that does not exist, or
+    the cap silently rises above what Wikimedia allows.
+    """
+    import re
+
+    from wikiflow_airflow.pools import (
+        WIKIMEDIA_CONNECTION_CAP,
+        WIKIMEDIA_DUMPS_POOL,
+        WIKIMEDIA_DUMPS_SLOTS,
+    )
+
+    compose = Path("/opt/airflow/docker-compose.yml")
+    if not compose.exists():
+        pytest.skip("docker-compose.yml is not mounted into this container")
+
+    match = re.search(r"airflow pools set (\S+) (\d+)", compose.read_text(encoding="utf-8"))
+    assert match, "airflow-init no longer creates the pool"
+    assert match.group(1) == WIKIMEDIA_DUMPS_POOL
+    assert int(match.group(2)) == WIKIMEDIA_DUMPS_SLOTS
+    assert WIKIMEDIA_DUMPS_SLOTS < WIKIMEDIA_CONNECTION_CAP

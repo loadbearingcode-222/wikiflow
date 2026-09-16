@@ -55,6 +55,8 @@ x-airflow-common: &airflow-common
     - ./dbt:/opt/airflow/dbt
     - ./seeds:/opt/airflow/seeds
     - ./pyproject.toml:/opt/airflow/pyproject.toml:ro
+    # Read-only, so DAG tests can assert the pool airflow-init creates matches code.
+    - ./docker-compose.yml:/opt/airflow/docker-compose.yml:ro
     - warehouse-data:/opt/airflow/warehouse
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
@@ -144,6 +146,10 @@ services:
         mkdir -p /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins
         chown -R "$${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins
         airflow db migrate
+        # Global cap on connections to dumps.wikimedia.org (3 per IP). Must match
+        # WIKIMEDIA_DUMPS_POOL / WIKIMEDIA_DUMPS_SLOTS in src/wikiflow_airflow/pools.py;
+        # a test asserts they agree.
+        airflow pools set wikimedia_dumps 2 "Connections to dumps.wikimedia.org (cap: 3 per IP)"
         airflow users create \
           --username "$${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
           --password "$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
