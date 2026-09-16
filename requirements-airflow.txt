@@ -1,0 +1,11 @@
+# Installed INTO the Airflow container image only (see Dockerfile).
+# Local development does not install Airflow at all - see pyproject.toml for why.
+apache-airflow-providers-amazon
+apache-airflow-providers-http
+
+# Runtime deps shared with src/wikiflow. Keep in sync with pyproject.toml [project.dependencies].
+duckdb>=1.1
+httpx>=0.27
+boto3>=1.35
+pydantic>=2.9
+pydantic-settings>=2.5

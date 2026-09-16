@@ -1,0 +1,13 @@
+# Normalise line endings. Without this, Windows checkouts produce CRLF files that
+# break shell scripts and container entrypoints when mounted into Linux images.
+* text=auto eol=lf
+
+# PowerShell stays CRLF: Windows PowerShell 5.1 mishandles LF in here-strings.
+*.ps1 text eol=crlf
+
+# Never touch these.
+*.gz        binary
+*.parquet   binary
+*.duckdb    binary
+*.png       binary
+*.jpg       binary

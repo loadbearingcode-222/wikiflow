@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast gate: pure logic only. No Docker, no Airflow, no network.
+  quality:
+    name: lint / types / unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-groups
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Unit tests
+        run: uv run pytest tests/unit -m unit --cov=wikiflow --cov-report=term-missing
+
+  # Slow gate: builds the real Airflow image and imports every DAG. This is what
+  # catches a DAG that only breaks at parse time in the scheduler.
+  dags:
+    name: DAG integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate a throwaway .env
+        run: |
+          sed -e "s|^FERNET_KEY=.*|FERNET_KEY=$(openssl rand -base64 32)|" \
+              -e "s|^AIRFLOW__API_AUTH__JWT_SECRET=.*|AIRFLOW__API_AUTH__JWT_SECRET=$(openssl rand -hex 32)|" \
+              .env.example > .env
+
+      - name: Build the Airflow image
+        run: docker compose build airflow-scheduler
+
+      - name: DAG + integration tests
+        run: >
+          docker compose run --rm --no-deps airflow-scheduler
+          pytest /opt/airflow/tests -m "dag or integration" -ra

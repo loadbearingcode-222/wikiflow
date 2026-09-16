@@ -1,0 +1,83 @@
+[project]
+name = "wikiflow"
+version = "0.1.0"
+description = "Incremental ingestion of Wikimedia hourly pageviews with Airflow, DuckDB and dbt"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# NOTE: Airflow is deliberately NOT a dependency here.
+# Everything under src/wikiflow/ is pure, importable library code with zero Airflow
+# imports, so the unit tests run locally on Windows in milliseconds. Airflow lives
+# only in the container image (see Dockerfile) and only dags/ imports it.
+dependencies = [
+    "duckdb>=1.1",
+    "httpx>=0.27",
+    "boto3>=1.35",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wikiflow"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "dags"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # bugbear
+    "UP",        # pyupgrade
+    "SIM",       # simplify
+    "PTH",       # use pathlib, never os.path  <- matters: project path has a space
+    "RUF",
+]
+ignore = [
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+# DAG files import airflow, which is not installed locally; they are type-checked
+# inside the container instead (see `make typecheck-container`).
+exclude = ["^dags/"]
+
+[[tool.mypy.overrides]]
+module = ["duckdb.*", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "unit: pure functions, no network, no Airflow, no containers",
+    "dag: requires Airflow to be importable (container only)",
+    "integration: requires MinIO/DuckDB; runs against committed fixtures",
+]

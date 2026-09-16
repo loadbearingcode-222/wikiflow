@@ -1,0 +1,211 @@
+# wikiflow local stack.
+#
+# Derived from the official Airflow 3.3.1 docker-compose, with two deliberate changes:
+#   1. LocalExecutor instead of CeleryExecutor - drops the Redis and worker containers.
+#      Task parallelism is lower, which does not matter for an hourly pipeline, and the
+#      stack fits in roughly 3GB instead of roughly 6GB.
+#   2. MinIO added as S3-compatible object storage, so the pipeline code talks s3:// and
+#      would port to real AWS by changing one endpoint URL.
+#
+# The triggerer IS kept: deferrable sensors do not work without it, and the availability
+# sensor in pageviews_ingest is deferrable by design.
+#
+# NOTE ON PATHS: every volume below is relative (./x). The absolute project path contains
+# a space and is deliberately never written into any config. See docs/adr/0004.
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ${AIRFLOW_IMAGE:-wikiflow/airflow:3.3.1-python3.12}
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-wikiflow_dev_jwt_secret}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    PYTHONPATH: /opt/airflow/src
+    # --- wikiflow application config (read by src/wikiflow/config.py) ---
+    WIKIFLOW_S3_ENDPOINT_URL: http://minio:9000
+    WIKIFLOW_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-wikiflow}
+    WIKIFLOW_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-wikiflow_dev_secret}
+    WIKIFLOW_RAW_BUCKET: ${WIKIFLOW_RAW_BUCKET:-wikiflow-raw}
+    WIKIFLOW_LAKE_BUCKET: ${WIKIFLOW_LAKE_BUCKET:-wikiflow-lake}
+    WIKIFLOW_USER_AGENT: ${WIKIFLOW_USER_AGENT:-wikiflow/0.1 (portfolio project)}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    - ./src:/opt/airflow/src
+    - ./tests:/opt/airflow/tests
+    - ./dbt:/opt/airflow/dbt
+    - ./seeds:/opt/airflow/seeds
+    - ./pyproject.toml:/opt/airflow/pyproject.toml:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+
+services:
+  # ---------------------------------------------------------------- metadata db
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # ---------------------------------------------------------------- object storage
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wikiflow}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wikiflow_dev_secret}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    restart: always
+
+  # Creates the buckets, and doubles as the readiness gate for MinIO.
+  # This is why the minio service itself has no healthcheck: the official MinIO image
+  # ships neither curl nor a guaranteed shell, so a container-side healthcheck is
+  # unreliable. Retrying the mc alias from the mc image is robust and does the bucket
+  # bootstrap in the same step.
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-wikiflow}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wikiflow_dev_secret}
+      WIKIFLOW_RAW_BUCKET: ${WIKIFLOW_RAW_BUCKET:-wikiflow-raw}
+      WIKIFLOW_LAKE_BUCKET: ${WIKIFLOW_LAKE_BUCKET:-wikiflow-lake}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for i in $$(seq 1 30); do
+          if mc alias set local "http://minio:9000" "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; then
+            echo "minio reachable after attempt $$i"
+            break
+          fi
+          echo "waiting for minio ($$i/30)..."
+          sleep 2
+        done
+        mc mb --ignore-existing "local/$$WIKIFLOW_RAW_BUCKET"
+        mc mb --ignore-existing "local/$$WIKIFLOW_LAKE_BUCKET"
+        mc ls local
+        echo "buckets ready"
+
+  # ---------------------------------------------------------------- airflow
+  airflow-init:
+    <<: *airflow-common
+    # Runs as root so it can fix ownership of the bind-mounted logs/ directory.
+    user: "0:0"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins
+        chown -R "$${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/config /opt/airflow/plugins
+        airflow db migrate
+        airflow users create \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
+          --firstname wiki --lastname flow \
+          --role Admin --email admin@example.invalid || true
+        echo "airflow initialised"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Required for deferrable operators. The availability sensor defers instead of
+  # occupying a worker slot while it waits up to 5h for the dump to publish - without
+  # the triggerer that sensor would never resume.
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
+  minio-data:

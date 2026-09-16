@@ -1,0 +1,36 @@
+# --- secrets / local env ---
+.env
+!.env.example
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# --- airflow runtime (mounted, not source) ---
+logs/
+airflow.cfg
+airflow.db
+webserver_config.py
+standalone_admin_password.txt
+
+# --- data & warehouse artefacts ---
+*.duckdb
+*.duckdb.wal
+data/
+scratch/
+
+# --- dbt ---
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# --- os ---
+.DS_Store
+Thumbs.db
