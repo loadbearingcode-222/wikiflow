@@ -487,7 +487,12 @@ with right:
             theme=None,
             width="stretch",
         )
-        table_view(access[["company_name", "views", "mobile_share"]])
+        st.caption(
+            "Views counted under a redirect title - a reader who asked for "
+            "*Apple Computer* and landed on *Apple Inc.* - are included, and shown "
+            "separately in the table."
+        )
+        table_view(access[["company_name", "views", "mobile_share", "redirect_share"]])
 
 # --- pipeline health -----------------------------------------------------------------
 st.divider()
@@ -503,8 +508,11 @@ except duckdb.Error as exc:
 if audit.empty:
     st.info("No ingestion attempts recorded yet.")
 else:
-    successes = audit[audit["status"] == "success"]
     failures = audit[audit["status"] != "success"]
+    # Timing tiles use scheduler ingests only. Hours rebuilt from raw skip the download,
+    # take ~4s instead of ~20s, and once outnumbered real ingests - which made the median
+    # read 4s and "last successful ingest" report a reprocess as if it were ingestion.
+    successes = audit[(audit["status"] == "success") & (audit["dag_id"] == "pageviews_ingest")]
     last_success = (
         pd.to_datetime(successes["started_at"], utc=True).max() if not successes.empty else None
     )
@@ -520,6 +528,7 @@ else:
     health[2].metric(
         "Median ingest time",
         f"{successes['duration_seconds'].median():,.0f}s" if not successes.empty else "-",
+        help="Scheduler ingests only, download included. Hours rebuilt from raw are excluded.",
         border=True,
     )
     health[3].metric(
@@ -535,12 +544,18 @@ else:
     for column in ("started_at", "interval_start"):
         shown[column] = pd.to_datetime(shown[column], utc=True).dt.tz_convert(None)
     shown["status"] = shown["status"].map(status_label)
+    shown["source"] = (
+        shown["dag_id"]
+        .map({"pageviews_ingest": "Ingested", "reprocess_from_raw": "Rebuilt from raw"})
+        .fillna(shown["dag_id"])
+    )
     shown["error"] = shown["error"].fillna("")
     st.dataframe(
         shown[
             [
                 "started_at",
                 "interval_start",
+                "source",
                 "try_number",
                 "status",
                 "duration_seconds",
@@ -558,6 +573,7 @@ else:
             "interval_start": st.column_config.DatetimeColumn(
                 "Hour (UTC)", format="YYYY-MM-DD HH:00"
             ),
+            "source": st.column_config.TextColumn("How"),
             "try_number": st.column_config.NumberColumn("Try"),
             "duration_seconds": st.column_config.NumberColumn("Seconds", format="%.0f"),
             "rows_scanned": st.column_config.NumberColumn("Rows scanned", format="localized"),

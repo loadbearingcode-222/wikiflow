@@ -9,7 +9,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [string]$Target = 'help'
+    [string]$Target = 'help',
+    # Only for `reprocess`: UTC hours, e.g. 2026-09-14T00
+    [string]$From,
+    [string]$To
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +58,9 @@ switch ($Target.ToLowerInvariant()) {
             @('format',         'Auto-fix formatting and lint rules'),
             @('typecheck',      'Type-check src/ and tests/'),
             @('check',          'Everything CI runs, locally'),
+            @('reprocess',      'Rebuild bronze from raw: -From 2026-09-14T00 -To 2026-09-14T23'),
+            @('pg-sync',        'Load new or rewritten bronze into Postgres'),
+            @('parity',         'Compare every mart in DuckDB and Postgres'),
             @('reset',          'Destroy the stack INCLUDING volumes'),
             @('pin-images',     'Resolve floating image tags to digests')
         ) | ForEach-Object { '    {0,-16} {1}' -f $_[0], $_[1] }
@@ -70,6 +76,8 @@ switch ($Target.ToLowerInvariant()) {
         Write-Host ''
         Write-Host '  Airflow UI  ->  http://localhost:8080   (airflow / airflow)' -ForegroundColor Green
         Write-Host '  MinIO       ->  http://localhost:9001' -ForegroundColor Green
+        Write-Host '  Dashboard   ->  http://localhost:8501' -ForegroundColor Green
+        Write-Host '  Postgres    ->  localhost:5433   (wikiflow / wikiflow_dev_secret)' -ForegroundColor Green
         Write-Host ''
     }
     'down'    { Compose @('down') }
@@ -85,6 +93,13 @@ switch ($Target.ToLowerInvariant()) {
     'format'    { Uv @('run', 'ruff', 'check', '--fix', '.'); Uv @('run', 'ruff', 'format', '.') }
     'typecheck' { Uv @('run', 'mypy') }
     'check'     { & $PSCommandPath lint; & $PSCommandPath typecheck; & $PSCommandPath test }
+
+    'reprocess' {
+        if (-not $From -or -not $To) { throw 'reprocess needs -From and -To, e.g. -From 2026-09-14T00 -To 2026-09-14T23' }
+        Compose @('exec', 'airflow-scheduler', 'python', '-m', 'wikiflow.reprocess', '--start', $From, '--end', $To)
+    }
+    'pg-sync' { Compose @('exec', 'airflow-scheduler', 'python', '-m', 'wikiflow.postgres_load') }
+    'parity'  { Compose @('exec', 'airflow-scheduler', 'python', '-m', 'wikiflow.parity') }
 
     'reset'      { Compose @('down', '-v') }
     'pin-images' { Invoke-Checked 'bash' @('scripts/pin-images.sh') }

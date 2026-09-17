@@ -38,7 +38,7 @@ select
     c.company_name,
     c.company_views,
     t.total_views,
-    c.company_views::double / nullif(t.total_views, 0) as share_of_traffic
+    {{ as_double('c.company_views') }} / nullif(t.total_views, 0) as share_of_traffic
 
 from company_hourly c
 join traffic_hourly t

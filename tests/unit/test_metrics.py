@@ -19,13 +19,13 @@ def warehouse() -> duckdb.DuckDBPyConnection:
     connection.execute(
         """
         CREATE TABLE main_marts.fct_company_pageviews_hourly AS SELECT * FROM (VALUES
-          ('Q312', 'Apple Inc.', 'en', 'desktop',    100),
-          ('Q312', 'Apple Inc.', 'en', 'mobile-web', 300),
-          ('Q312', 'Apple Inc.', 'de', 'mobile-web',  50),
-          ('Q312', 'Apple Inc.', 'fr', 'desktop',     20),
-          ('Q312', 'Apple Inc.', 'ja', 'desktop',     10),
-          ('Q95',  'Google',     'en', 'desktop',    200)
-        ) AS t(company_qid, company_name, wiki_language, access_method, views)
+          ('Q312', 'Apple Inc.', 'en', 'desktop',    'sitelink', 100),
+          ('Q312', 'Apple Inc.', 'en', 'mobile-web', 'sitelink', 300),
+          ('Q312', 'Apple Inc.', 'de', 'mobile-web', 'redirect',  50),
+          ('Q312', 'Apple Inc.', 'fr', 'desktop',    'sitelink',  20),
+          ('Q312', 'Apple Inc.', 'ja', 'desktop',    'redirect',  10),
+          ('Q95',  'Google',     'en', 'desktop',    'sitelink', 200)
+        ) AS t(company_qid, company_name, wiki_language, access_method, match_type, views)
         """
     )
     connection.execute(
@@ -103,6 +103,8 @@ def test_mobile_share_per_company(warehouse: duckdb.DuckDBPyConnection) -> None:
 
     assert rows["Q312"]["mobile_share"] == pytest.approx(350 / 480)
     assert rows["Q95"]["mobile_share"] == 0.0
+    assert rows["Q312"]["redirect_share"] == pytest.approx(60 / 480)
+    assert rows["Q95"]["redirect_share"] == 0.0
 
 
 def write_run_results(path: Path, results: list[dict[str, object]], command: str = "build") -> Path:

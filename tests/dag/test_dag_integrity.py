@@ -163,6 +163,8 @@ def test_all_expected_dags_exist(dagbag) -> None:
         "pageviews_transform",
         "pageviews_quality",
         "raw_retention",
+        "company_pages_refresh",
+        "pageviews_transform_postgres",
     }
 
 
@@ -270,11 +272,66 @@ def test_pool_is_created_below_the_documented_connection_cap() -> None:
     if not compose.exists():
         pytest.skip("docker-compose.yml is not mounted into this container")
 
-    match = re.search(r"airflow pools set (\S+) (\d+)", compose.read_text(encoding="utf-8"))
-    assert match, "airflow-init no longer creates the pool"
-    assert match.group(1) == WIKIMEDIA_DUMPS_POOL
-    assert int(match.group(2)) == WIKIMEDIA_DUMPS_SLOTS
+    pools = dict(
+        (name, int(slots))
+        for name, slots in re.findall(
+            r"airflow pools set (\S+) (\d+)", compose.read_text(encoding="utf-8")
+        )
+    )
+    assert WIKIMEDIA_DUMPS_POOL in pools, "airflow-init no longer creates the pool"
+    assert pools[WIKIMEDIA_DUMPS_POOL] == WIKIMEDIA_DUMPS_SLOTS
     assert WIKIMEDIA_DUMPS_SLOTS < WIKIMEDIA_CONNECTION_CAP
+
+
+@pytest.mark.dag
+def test_every_dbt_invocation_shares_one_slot(dagbag) -> None:
+    """Both transform DAGs run dbt from one project directory.
+
+    `dbt deps` in one rewrites dbt_packages/ while a build in the other may be parsing
+    macros from it. The race is intermittent, which is what makes it expensive: it
+    would look like flakiness. One pool slot across both DAGs removes it.
+    """
+    import re
+
+    from wikiflow_airflow.pools import DBT_PROJECT_POOL, DBT_PROJECT_SLOTS
+
+    dbt_tasks = [
+        task
+        for dag_id in ("pageviews_transform", "pageviews_transform_postgres")
+        for task in dagbag.dags[dag_id].tasks
+        if "dbt" in str(getattr(task, "bash_command", ""))
+    ]
+    assert len(dbt_tasks) >= 4
+    for task in dbt_tasks:
+        assert task.pool == DBT_PROJECT_POOL, f"{task.dag_id}.{task.task_id}"
+
+    compose = Path("/opt/airflow/docker-compose.yml")
+    if compose.exists():
+        created = re.search(
+            rf"airflow pools set {DBT_PROJECT_POOL} (\d+)", compose.read_text(encoding="utf-8")
+        )
+        assert created, "airflow-init does not create the dbt pool"
+        assert int(created.group(1)) == DBT_PROJECT_SLOTS == 1
+
+
+@pytest.mark.dag
+def test_postgres_transform_is_triggered_by_the_same_asset(dagbag) -> None:
+    """Independent of the DuckDB DAG, but fed by the same bronze publication."""
+    duck = dagbag.dags["pageviews_transform"]
+    pg = dagbag.dags["pageviews_transform_postgres"]
+    uris = lambda dag: {getattr(asset, "uri", None) for asset in dag.schedule}  # noqa: E731
+    assert uris(pg) == uris(duck)
+    assert pg.max_active_runs == 1
+    assert "--target pg" in pg.get_task("dbt_build").bash_command
+    assert "--target-path target/postgres" in pg.get_task("dbt_build").bash_command
+
+
+@pytest.mark.dag
+def test_company_filter_refresh_publishes_the_reference_asset(dagbag) -> None:
+    dag = dagbag.dags["company_pages_refresh"]
+    outlets = {getattr(o, "uri", None) for t in dag.tasks for o in t.outlets}
+    assert "s3://wikiflow-lake/reference/company_pages" in outlets
+    assert isinstance(dag.schedule, str) or dag.timetable is not None
 
 
 # ---------------------------------------------------------------- the image itself
@@ -304,3 +361,4 @@ def test_dbt_is_installed_where_the_transform_dag_calls_it() -> None:
     result = subprocess.run([str(dbt), "--version"], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     assert "duckdb" in result.stdout, "the dbt-duckdb adapter is not installed"
+    assert "postgres" in result.stdout, "the dbt-postgres adapter is not installed"

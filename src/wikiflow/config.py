@@ -39,6 +39,21 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 120.0
     """Generous: these are 45-70 MB files from a free, sometimes slow, public mirror."""
 
+    # --- the server warehouse (ADR 0008) --------------------------------------
+    pg_host: str = "warehouse-postgres"
+    pg_port: int = 5432
+    pg_user: str = "wikiflow"
+    pg_password: str = "wikiflow_dev_secret"
+    pg_database: str = "wikiflow"
+
+    @property
+    def pg_conninfo(self) -> str:
+        """libpq keyword/value form, understood by both psycopg and DuckDB's ATTACH."""
+        return (
+            f"host={self.pg_host} port={self.pg_port} dbname={self.pg_database} "
+            f"user={self.pg_user} password={self.pg_password}"
+        )
+
     # --- retention --------------------------------------------------------
     raw_retention_days: int = Field(default=7, ge=1)
     """The replay budget. Within this window a parsing bug can be fixed and the

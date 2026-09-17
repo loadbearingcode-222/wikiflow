@@ -46,3 +46,23 @@ def test_wikiflow_does_not_import_airflow() -> None:
 
     offenders = [name for name in sys.modules if name == "airflow" or name.startswith("airflow.")]
     assert not offenders, f"src/wikiflow must not import Airflow, but found: {offenders}"
+
+
+@pytest.mark.unit
+def test_runtime_imports_that_duckdb_makes_lazily_are_declared() -> None:
+    """DuckDB imports pytz only when it returns a TIMESTAMPTZ value to Python.
+
+    Nothing in the code imports it, so no linter sees the dependency. Locally it arrived
+    through dbt; the dashboard image, which installs no dbt, failed to read the audit
+    trail with `No module named 'pytz'` while every test here passed.
+    """
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    declared = {
+        dep.split(">")[0].split("[")[0].strip() for dep in pyproject["project"]["dependencies"]
+    }
+    assert "pytz" in declared

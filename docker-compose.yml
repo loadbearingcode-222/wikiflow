@@ -45,6 +45,12 @@ x-airflow-common: &airflow-common
     # dbt talks to MinIO by service name; the local default is localhost:9000.
     WIKIFLOW_S3_ENDPOINT_HOSTPORT: minio:9000
     DBT_PROFILES_DIR: /opt/airflow/dbt
+    # --- the second warehouse (ADR 0008) ---
+    WIKIFLOW_PG_HOST: warehouse-postgres
+    WIKIFLOW_PG_PORT: '5432'
+    WIKIFLOW_PG_USER: ${WIKIFLOW_PG_USER:-wikiflow}
+    WIKIFLOW_PG_PASSWORD: ${WIKIFLOW_PG_PASSWORD:-wikiflow_dev_secret}
+    WIKIFLOW_PG_DATABASE: ${WIKIFLOW_PG_DATABASE:-wikiflow}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -64,6 +70,8 @@ x-airflow-common: &airflow-common
       condition: service_healthy
     minio-init:
       condition: service_completed_successfully
+    warehouse-postgres:
+      condition: service_healthy
 
 services:
   # ---------------------------------------------------------------- metadata db
@@ -77,6 +85,28 @@ services:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # ---------------------------------------------------------------- warehouse (server)
+  # The second warehouse (ADR 0008). Deliberately NOT the Postgres above: that one holds
+  # Airflow's metadata, and a warehouse sharing it would let an expensive analytical
+  # query slow the scheduler down - or a scheduler upgrade take the warehouse with it.
+  warehouse-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    environment:
+      POSTGRES_USER: ${WIKIFLOW_PG_USER:-wikiflow}
+      POSTGRES_PASSWORD: ${WIKIFLOW_PG_PASSWORD:-wikiflow_dev_secret}
+      POSTGRES_DB: ${WIKIFLOW_PG_DATABASE:-wikiflow}
+    ports:
+      # 5433 on the host, so it cannot collide with a Postgres already installed locally.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - warehouse-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       retries: 5
       start_period: 5s
@@ -155,6 +185,9 @@ services:
         # WIKIMEDIA_DUMPS_POOL / WIKIMEDIA_DUMPS_SLOTS in src/wikiflow_airflow/pools.py;
         # a test asserts they agree.
         airflow pools set wikimedia_dumps 2 "Connections to dumps.wikimedia.org (cap: 3 per IP)"
+        # One dbt invocation at a time across BOTH transform DAGs - they share one dbt
+        # project directory. Must match DBT_PROJECT_POOL in pools.py.
+        airflow pools set dbt_project 1 "dbt invocations sharing /opt/airflow/dbt"
         airflow users create \
           --username "$${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
           --password "$${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
@@ -263,3 +296,4 @@ volumes:
   postgres-db-volume:
   minio-data:
   warehouse-data:
+  warehouse-postgres-data:

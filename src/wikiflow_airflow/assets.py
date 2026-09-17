@@ -33,3 +33,21 @@ MARTS_READY = Asset(
     "duckdb://wikiflow/marts",
     extra={"description": "dbt marts rebuilt and all tests passing."},
 )
+
+#: The company filter: tracked articles and their redirects. Published daily by
+#: company_pages_refresh and read by every ingest run (see wikiflow.reference).
+REFERENCE_COMPANY_PAGES = Asset(
+    "s3://wikiflow-lake/reference/company_pages",
+    extra={"description": "Company articles and redirects the hourly filter matches."},
+)
+
+#: The same marts, built in the server warehouse by pageviews_transform_postgres.
+#:
+#: The URI names the fact table because it has to: the Postgres provider validates
+#: `postgres://` URIs as host:port/database/schema/table and raises otherwise. Because
+#: this module is shared, a shorter URI here once failed every DAG importing it -
+#: ingestion included - not just the one that used it.
+POSTGRES_MARTS_READY = Asset(
+    "postgres://warehouse-postgres:5432/wikiflow/public_marts/fct_company_pageviews_hourly",
+    extra={"description": "dbt marts rebuilt in Postgres and all tests passing."},
+)

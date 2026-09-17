@@ -6,5 +6,5 @@
   string that joins back to the source file.
 #}
 {% macro decode_page_title(column_name) %}
-    replace(url_decode({{ column_name }}), '_', ' ')
+    replace({{ url_decode(column_name) }}, '_', ' ')
 {% endmacro %}

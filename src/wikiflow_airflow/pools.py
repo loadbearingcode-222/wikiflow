@@ -20,3 +20,10 @@ WIKIMEDIA_DUMPS_SLOTS = 2
 
 #: The documented limit, kept here so a test can assert the pool stays below it.
 WIKIMEDIA_CONNECTION_CAP = 3
+
+#: Every dbt invocation takes the single slot. Both transform DAGs - DuckDB and
+#: Postgres - run dbt from the same project directory, and `dbt deps` rewrites
+#: dbt_packages/ in place: a build parsing macros while another task reinstalls them
+#: fails intermittently, in a way that would look like flakiness rather than a race.
+DBT_PROJECT_POOL = "dbt_project"
+DBT_PROJECT_SLOTS = 1

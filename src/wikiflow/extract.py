@@ -181,7 +181,7 @@ def extract_hour(
         _enrich_domain_totals(connection)
 
         # --- narrow grain: rows about tracked companies ---------------------
-        # An inner join against ~2,200 (domain_code, page_title) pairs. DuckDB builds
+        # An inner join against the filter's (domain_code, page_title) pairs. DuckDB builds
         # the hash table from the small side and probes it with the 8M-row scan.
         connection.execute(
             """
@@ -192,6 +192,10 @@ def extract_hour(
                 c.language,
                 c.project,
                 c.access_method,
+                -- `redirect` rows are views that landed on the article via another
+                -- title. Kept distinguishable so they can be reported, not just summed.
+                c.match_type,
+                c.canonical_title,
                 r.domain_code,
                 r.page_title,
                 r.count_views,
@@ -314,6 +318,8 @@ COMPANY_PAGE_COLUMNS = (
     "language",
     "project",
     "access_method",
+    "match_type",
+    "canonical_title",
 )
 
 
@@ -327,8 +333,8 @@ def _register_company_pages(
     actual 7.4M-row scan. Routing through a file drops that to milliseconds, because
     the CSV reader is the path DuckDB actually optimises.
 
-    This also matches production shape: the company dimension is materialised by the
-    monthly Wikidata DAG, so the real pipeline reads it from storage anyway.
+    The filter itself is published daily by the company_pages_refresh DAG and read
+    from object storage (see wikiflow.reference); this only loads it into DuckDB.
     """
     column_ddl = ", ".join(f"{name} VARCHAR" for name in COMPANY_PAGE_COLUMNS)
     connection.execute(f"CREATE OR REPLACE TEMP TABLE company_pages ({column_ddl})")
@@ -350,6 +356,8 @@ def _register_company_pages(
                     page.language or "",
                     page.project,
                     page.access_method,
+                    page.match_type,
+                    page.canonical_title or page.page_title,
                 )
                 for page in pages
             )
@@ -361,6 +369,10 @@ def _register_company_pages(
             FROM read_csv(
                 {_sql_literal(csv_path.as_posix())},
                 header = true,
+                -- Explicit: titles contain `"` (Hebrew abbreviation marks), which
+                -- csv.writer doubles and an auto-detected escape then rejects.
+                quote = '"',
+                escape = '"',
                 columns = {{{", ".join(f"'{c}': 'VARCHAR'" for c in COMPANY_PAGE_COLUMNS)}}}
             )
             """

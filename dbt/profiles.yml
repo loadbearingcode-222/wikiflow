@@ -41,3 +41,17 @@ wikiflow:
           region: "us-east-1"
           use_ssl: false
           url_style: "path"
+
+    # The server warehouse (ADR 0008). The same models build here unchanged; the few
+    # dialect differences are dispatched macros (macros/cross_warehouse.sql), and bronze
+    # is loaded first by wikiflow.postgres_load, because Postgres cannot read Parquet
+    # out of object storage the way DuckDB does.
+    pg:
+      type: postgres
+      host: "{{ env_var('WIKIFLOW_PG_HOST', 'localhost') }}"
+      port: "{{ env_var('WIKIFLOW_PG_PORT', '5433') | as_number }}"
+      user: "{{ env_var('WIKIFLOW_PG_USER', 'wikiflow') }}"
+      password: "{{ env_var('WIKIFLOW_PG_PASSWORD', 'wikiflow_dev_secret') }}"
+      dbname: "{{ env_var('WIKIFLOW_PG_DATABASE', 'wikiflow') }}"
+      schema: public
+      threads: 4

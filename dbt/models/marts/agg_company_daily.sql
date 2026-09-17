@@ -13,7 +13,8 @@ select
     sum(views)                                                       as views,
     sum(case when access_method = 'mobile-web' then views else 0 end) as mobile_views,
     sum(case when access_method = 'desktop'    then views else 0 end) as desktop_views,
-    sum(case when access_method = 'mobile-web' then views else 0 end)::double
+    sum(case when match_type = 'redirect'      then views else 0 end) as redirect_views,
+    {{ as_double("sum(case when access_method = 'mobile-web' then views else 0 end)") }}
         / nullif(sum(views), 0)                                      as mobile_share,
     count(distinct wiki_language)                                    as language_editions,
     count(distinct view_hour)                                        as hours_present

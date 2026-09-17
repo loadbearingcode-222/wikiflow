@@ -111,17 +111,17 @@ this is a broken filter, not a quiet hour.
 
 **Diagnose in order:**
 
-1. Did Wikidata change an article title? Re-run the resolution and compare:
+1. What filter did the run use? `ensure_company_filter` logs its size. Expect about
+   2,240 article rows and 8,700 rows in total (articles plus redirects). The filter is
+   published daily by `company_pages_refresh`; see *filter refresh refused* below.
+2. Did Wikidata change an article title? Re-resolve without publishing and compare:
    ```bash
    docker compose exec airflow-scheduler python -c "
    from pathlib import Path
    from wikiflow.wikidata import load_companies, resolve_company_pages
    pages = resolve_company_pages(load_companies(Path('/opt/airflow/seeds/companies.csv')))
-   print(len(pages), 'pairs')"
+   print(len(pages), 'article rows')"
    ```
-   Expect ~2,238 pairs. A much smaller number means the Wikidata lookup partly failed.
-2. Did the Wikidata API return an error? The task would have failed earlier with
-   `SitelinkResolutionError`, so if it got this far the API answered.
 3. Is the dump itself unusually small? Compare `rows_scanned` in the audit record
    against neighbouring hours.
 
@@ -225,6 +225,75 @@ Then inspect the failing rows: `our_views` vs `their_views` per domain and hour.
 
 ---
 
+## `company_pages_refresh` — filter refresh refused or failed
+
+**Symptom:** `ReferenceShrinkError: refusing to publish: rows fell from N to M`, or
+`RedirectResolutionError`.
+
+**Means:** a new filter came back much smaller than the one in use, or one wiki could
+not be asked about its redirects. **Nothing was published**: ingestion keeps using the
+current filter, so the only cost is that it goes a day staler. Article titles change
+over weeks, so this is not urgent.
+
+Neither error is retried into a partial result. A filter missing one wiki's redirects
+would undercount that language in every hour ingested afterwards, and nothing
+downstream could tell that apart from a quiet day.
+
+**Check:** the task log shows which wiki failed, or the before/after counts. Then look
+at the published snapshots, one per successful refresh:
+
+```bash
+docker compose exec airflow-scheduler python -c "
+from wikiflow.config import get_settings
+from wikiflow.storage import list_keys
+print(*list_keys(get_settings().lake_bucket, 'reference/company_pages/'), sep='
+')"
+```
+
+If the shrink is real - a company was removed from `seeds/companies.csv` - publish once
+with the guard lifted:
+
+```bash
+docker compose exec airflow-scheduler python -c "
+from pathlib import Path
+from wikiflow.redirects import resolve_filter
+from wikiflow.reference import publish
+print(publish(resolve_filter(Path('/opt/airflow/seeds/companies.csv')), max_ratio=1.0))"
+```
+
+---
+
+## `pageviews_transform_postgres` — load or build fails
+
+**Means:** the Postgres marts are stale. The DuckDB marts and the dashboard are
+unaffected; the two transform DAGs are independent on purpose (ADR 0008).
+
+| Failing task | Likely cause |
+|---|---|
+| `load_bronze`, connection refused | `warehouse-postgres` is down: `docker compose ps warehouse-postgres` |
+| `load_bronze`, `more than one object` | Something other than the pipeline wrote into a bronze partition. Look at the named keys; do not delete either one until you know which is right |
+| `dbt_build`, `dbt_utils` not found | The DuckDB transform DAG installs dbt packages. On a fresh stack, let it run once |
+| `dbt_build`, a test fails | As for the DuckDB DAG below. The reconciliation test runs here too, against Postgres' copy of projectviews |
+
+The load is safe to re-run at any time. It loads only partitions whose object changed
+since the last load, each in its own transaction:
+
+```bash
+make pg-sync
+```
+
+**Do the two warehouses agree?**
+
+```bash
+make parity
+```
+
+Run it while neither transform DAG is building. A difference in `fct_*` or `agg_*`
+alone, with the dims identical, usually means one warehouse has not caught up yet: run
+`make pg-sync`, rebuild, and compare again before investigating.
+
+---
+
 ## `raw_retention` — safety refusal
 
 **Symptom:** `RetentionSafetyError: refusing to sweep: all N partitions are older
@@ -248,21 +317,21 @@ print(sweep(dry_run=True).manifest())"
 
 ## Common operations
 
-**Reprocess hours from raw, without re-downloading.** Within the 7-day window this runs
-at about 4 seconds per hour instead of 3½ minutes:
+**Reprocess hours from raw, without re-downloading.** After a change to extraction
+or to the company filter, rebuild every affected hour still inside the 7-day raw
+window. Each hour is re-verified, extracted with the current published filter, written
+to bronze exactly as ingestion does, and audited under `dag_id=reprocess_from_raw`:
 
 ```bash
-docker compose exec airflow-scheduler python -c "
-import csv, tempfile
-from datetime import UTC, datetime
-from pathlib import Path
-import duckdb
-from wikiflow.config import get_settings
-from wikiflow.extract import extract_hour
-from wikiflow.source import HourlyDump
-from wikiflow.storage import configure_duckdb_s3, overwrite_partition
-from wikiflow.wikidata import CompanyPage
-# ... see scripts/ for the full form"
+make reprocess FROM=2026-09-14T00 TO=2026-09-15T23      # Windows: .\make.ps1 reprocess -From ... -To ...
+```
+
+Hours with no raw file are skipped and listed. Reprocessing does not publish an Airflow
+Asset, so rebuild the marts afterwards. An incremental build only looks at recent hours,
+so use a full refresh:
+
+```bash
+docker compose exec airflow-scheduler /home/airflow/dbt-venv/bin/dbt build   --project-dir /opt/airflow/dbt --profiles-dir /opt/airflow/dbt --target prod --full-refresh
 ```
 
 **Rebuild the marts from scratch:**

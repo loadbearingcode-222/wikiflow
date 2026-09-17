@@ -3,12 +3,17 @@
 -- Incremental with delete+insert on the partition key - the SQL expression of the same
 -- rule the ingestion layer follows: a re-run REPLACES an hour rather than adding to it.
 -- There is no append path anywhere in this pipeline, so re-running cannot double-count.
+--
+-- on_schema_change='fail': the default, 'ignore', silently drops a new upstream column
+-- from an existing incremental table. A schema change here needs a --full-refresh, and
+-- the build should say so rather than quietly lose the column.
 
 {{
     config(
         materialized='incremental',
         incremental_strategy='delete+insert',
-        unique_key=['view_date', 'view_hour']
+        unique_key=['view_date', 'view_hour'],
+        on_schema_change='fail'
     )
 }}
 
@@ -38,6 +43,9 @@ select
     access_method,
     page_title,
     page_title_display,
+    -- `redirect`: the reader requested another title and landed on this article.
+    match_type,
+    canonical_title,
 
     views,
     response_bytes

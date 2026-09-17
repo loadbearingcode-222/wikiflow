@@ -152,7 +152,7 @@ def language_breakdown(
 
 
 def access_split(connection: duckdb.DuckDBPyConnection, qids: list[str]) -> list[Row]:
-    """Share of each company's views that came from the mobile web."""
+    """Share of each company's views from the mobile web, and via redirects."""
     if not qids:
         return []
     return _rows(
@@ -161,7 +161,9 @@ def access_split(connection: duckdb.DuckDBPyConnection, qids: list[str]) -> list
         SELECT company_qid, max(company_name) AS company_name,
                sum(views)::BIGINT AS views,
                sum(CASE WHEN access_method = 'mobile-web' THEN views ELSE 0 END)::DOUBLE
-                   / nullif(sum(views), 0) AS mobile_share
+                   / nullif(sum(views), 0) AS mobile_share,
+               sum(CASE WHEN match_type = 'redirect' THEN views ELSE 0 END)::DOUBLE
+                   / nullif(sum(views), 0) AS redirect_share
         FROM {MARTS}.fct_company_pageviews_hourly
         WHERE company_qid IN (SELECT unnest(?::VARCHAR[]))
         GROUP BY company_qid
@@ -184,7 +186,8 @@ def audit_attempts(
     return _rows(
         connection,
         f"""
-        SELECT started_at, interval_start, try_number, status, CAST(error AS VARCHAR) AS error,
+        SELECT started_at, interval_start, dag_id, try_number, status,
+               CAST(error AS VARCHAR) AS error,
                rows_scanned, company_rows, total_views, duration_seconds, run_id
         FROM read_parquet('{source}', hive_partitioning = false, union_by_name = true)
         ORDER BY started_at DESC

@@ -27,6 +27,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -76,6 +77,19 @@ class CompanyPage:
 
     domain_code: str
     access_method: str
+
+    match_type: str = "sitelink"
+    """`sitelink` for the article Wikidata names; `redirect` for a title that redirects to
+    it. Pageviews are counted against the title REQUESTED, so a reader arriving via
+    `Apple_Computer` is recorded there, not on `Apple_Inc.` - see wikiflow.redirects."""
+
+    canonical_title: str = ""
+    """The article this row's views belong to. Equal to page_title for a sitelink."""
+
+    site_host: str = ""
+    """e.g. `de.wikipedia.org` - where to ask MediaWiki about this article's redirects.
+    Taken from Wikidata's own sitelink URL rather than derived from the language code,
+    because the two differ (`be_x_oldwiki` is served from be-tarask.wikipedia.org)."""
 
 
 class SitelinkResolutionError(RuntimeError):
@@ -154,7 +168,8 @@ def _fetch_sitelinks(client: httpx.Client, qids: list[str]) -> dict[str, Any]:
         params={
             "action": "wbgetentities",
             "ids": "|".join(qids),
-            "props": "sitelinks",
+            # sitelinks/urls adds each article's URL, which supplies the wiki's hostname.
+            "props": "sitelinks/urls",
             "format": "json",
         },
     )
@@ -180,6 +195,7 @@ def _expand_entity(company: Company, sitelinks: dict[str, Any]) -> list[CompanyP
 
         # The dumps store titles with underscores, not spaces.
         title = link["title"].replace(" ", "_")
+        host = urlsplit(link.get("url", "")).hostname or ""
 
         for access in ("desktop", "mobile-web"):
             try:
@@ -201,6 +217,8 @@ def _expand_entity(company: Company, sitelinks: dict[str, Any]) -> list[CompanyP
                     page_title=title,
                     domain_code=domain_code,
                     access_method=access,
+                    canonical_title=title,
+                    site_host=host,
                 )
             )
 

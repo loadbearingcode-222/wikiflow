@@ -19,6 +19,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
 from wikiflow_airflow.assets import BRONZE_COMPANY_PAGEVIEWS, MARTS_READY
+from wikiflow_airflow.pools import DBT_PROJECT_POOL
 
 DBT_DIR = "/opt/airflow/dbt"
 
@@ -51,12 +52,14 @@ def pageviews_transform() -> None:
     # runs. Cheap and idempotent - it is a no-op once the lock file is satisfied.
     install_packages = BashOperator(
         task_id="dbt_deps",
+        pool=DBT_PROJECT_POOL,
         bash_command=f"{DBT} deps {COMMON_FLAGS}",
     )
 
     # Models and their tests, interleaved. A failed test blocks its dependents.
     build = BashOperator(
         task_id="dbt_build",
+        pool=DBT_PROJECT_POOL,
         bash_command=f"{DBT} build {COMMON_FLAGS} --target prod",
         outlets=[MARTS_READY],
     )
@@ -65,6 +68,7 @@ def pageviews_transform() -> None:
     # but it is the artefact that makes the model layer legible to anyone else.
     generate_docs = BashOperator(
         task_id="dbt_docs_generate",
+        pool=DBT_PROJECT_POOL,
         # A separate target path is required, not tidy. `docs generate` rewrites
         # run_results.json, and in ITS copy every test reads status "success" - meaning
         # compiled, not passed. Sharing the default path erased dbt build's real test

@@ -21,6 +21,13 @@ models:
           - accepted_values:
               arguments:
                 values: ["desktop", "mobile-web"]
+      - name: match_type
+        description: How the row matched the filter - the article title, or a redirect to it.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["sitelink", "redirect"]
 
   - name: stg_domain_totals
     description: Typed wide grain - per-project hourly totals.

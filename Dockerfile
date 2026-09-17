@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir --constraint "${CONSTRAINT_URL}" -r /tmp/requirem
 # dbt-core and Airflow both pin jinja2, click and protobuf, and resolving them into a
 # single environment is a recurring source of breakage. An isolated venv costs ~120MB
 # and removes the conflict entirely; Airflow invokes the CLI by absolute path.
-RUN python -m venv /home/airflow/dbt-venv     && /home/airflow/dbt-venv/bin/pip install --no-cache-dir --upgrade pip     && /home/airflow/dbt-venv/bin/pip install --no-cache-dir "dbt-duckdb>=1.11,<2.0"
+RUN python -m venv /home/airflow/dbt-venv     && /home/airflow/dbt-venv/bin/pip install --no-cache-dir --upgrade pip     && /home/airflow/dbt-venv/bin/pip install --no-cache-dir "dbt-duckdb>=1.11,<2.0" "dbt-postgres>=1.9,<2.0"
 
 ENV DBT_VENV_BIN=/home/airflow/dbt-venv/bin
 

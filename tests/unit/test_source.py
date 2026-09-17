@@ -178,3 +178,13 @@ def test_generated_url_matches_the_shape_observed_on_the_live_server() -> None:
     assert dump_url_for(utc(2026, 9, 14, 11)) == (
         "https://dumps.wikimedia.org/other/pageviews/2026/2026-09/pageviews-20260914-120000.gz"
     )
+
+
+@pytest.mark.unit
+def test_reprocess_hours_are_inclusive_and_cross_midnight() -> None:
+    from wikiflow.reprocess import hours
+
+    got = list(hours(datetime(2026, 9, 14, 22, tzinfo=UTC), datetime(2026, 9, 15, 1, tzinfo=UTC)))
+    assert [h.hour for h in got] == [22, 23, 0, 1]
+    with pytest.raises(ValueError, match="before start"):
+        list(hours(datetime(2026, 9, 15, tzinfo=UTC), datetime(2026, 9, 14, tzinfo=UTC)))

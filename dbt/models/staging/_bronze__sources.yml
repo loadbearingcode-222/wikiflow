@@ -17,9 +17,13 @@ sources:
           # parquet (so the files stay self-describing if moved), but DuckDB also
           # auto-detects them from the `dt=`/`hour=` path and the PATH version wins -
           # arriving as VARCHAR and shadowing the correctly-typed INTEGER column.
+          #
+          # union_by_name=true: match_type and canonical_title were added to bronze with
+          # redirect resolution (ADR 0007). Without it, a partition written before then
+          # makes the scan fail, or - worse - aligns columns by position.
           external_location: >-
             read_parquet('s3://wikiflow-lake/bronze/company_pageviews/dt=*/hour=*/*.parquet',
-                         hive_partitioning=false)
+                         hive_partitioning=false, union_by_name=true)
 
       - name: domain_totals
         description: >

@@ -26,6 +26,10 @@ renamed as (
         domain_code,
 
         page_title,
+        -- Partitions written before redirect resolution (ADR 0007) have neither column;
+        -- every row in them was matched on the article title itself.
+        coalesce(match_type, 'sitelink')      as match_type,
+        coalesce(canonical_title, page_title) as canonical_title,
         -- Dump titles are underscored and may be percent-encoded. Decode for display;
         -- the raw form is kept because it is the join key back to the source.
         {{ decode_page_title('page_title') }}  as page_title_display,

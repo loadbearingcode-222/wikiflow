@@ -251,6 +251,62 @@ def test_too_many_unparseable_lines_refuses_the_hour_before_writing(tmp_path: Pa
     assert not (out / "company_pageviews.parquet").exists()
 
 
+@pytest.mark.integration
+def test_redirect_views_are_matched_labelled_and_attributed(tmp_path: Path) -> None:
+    """A view requested under a redirect title reaches bronze, labelled with its article.
+
+    Synthetic, like the test above: the redirect title includes a `"`, the character
+    that broke loading the filter on real data (Hebrew abbreviation marks).
+    """
+    source = tmp_path / "redirects.gz"
+    with gzip.open(source, "wt", encoding="utf-8", newline="\n") as handle:
+        handle.write("en Apple_Computer 40 0\n")
+        handle.write("en Apple_Inc. 100 0\n")
+        handle.write('he אלפבת_בע"מ 3 0\n')
+
+    def page(domain: str, title: str, match: str, canonical: str) -> CompanyPage:
+        return CompanyPage(
+            qid="Q312",
+            company_name="Apple Inc.",
+            sitelink_key=f"{domain}wiki",
+            language=domain,
+            project="wikipedia",
+            page_title=title,
+            domain_code=domain,
+            access_method="desktop",
+            match_type=match,
+            canonical_title=canonical,
+        )
+
+    result = extract_hour(
+        source=str(source),
+        dump=HourlyDump.for_interval(INTERVAL),
+        company_pages=[
+            page("en", "Apple_Inc.", "sitelink", "Apple_Inc."),
+            page("en", "Apple_Computer", "redirect", "Apple_Inc."),
+            page("he", 'אלפבת_בע"מ', "redirect", "אפל"),
+        ],
+        output_dir=tmp_path / "out",
+    )
+
+    rows = (
+        duckdb.connect()
+        .execute(
+            f"""
+            SELECT page_title, match_type, canonical_title, count_views
+            FROM '{result.company_path.as_posix()}' ORDER BY count_views DESC
+            """
+        )
+        .fetchall()
+    )
+    assert rows == [
+        ("Apple_Inc.", "sitelink", "Apple_Inc.", 100),
+        ("Apple_Computer", "redirect", "Apple_Inc.", 40),
+        ('אלפבת_בע"מ', "redirect", "אפל", 3),
+    ]
+    assert result.company_views == 143
+
+
 @pytest.mark.unit
 def test_malformed_ratio_boundary() -> None:
     from wikiflow.extract import MalformedRowsError, check_malformed

@@ -10,6 +10,11 @@ macro-paths: ["macros"]
 target-path: "target"
 clean-targets: ["target", "dbt_packages"]
 
+# Creates the helper functions a warehouse needs before any model runs. A no-op on
+# DuckDB, which has them built in (macros/cross_warehouse.sql).
+on-run-start:
+  - "{{ create_warehouse_functions() }}"
+
 models:
   wikiflow:
     staging:

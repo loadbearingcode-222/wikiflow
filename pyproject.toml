@@ -15,6 +15,11 @@ dependencies = [
     "boto3>=1.35",
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
+    "psycopg[binary]>=3.2",
+    # DuckDB imports pytz to hand TIMESTAMPTZ values to Python (the audit trail's
+    # timestamps). Nothing else declares it: locally it arrived via dbt, so tests passed
+    # while the dashboard image - which does not install dbt - could not read the audit.
+    "pytz>=2024.1",
 ]
 
 [dependency-groups]
@@ -29,6 +34,7 @@ dashboard = [
 ]
 dbt = [
     "dbt-duckdb>=1.9",
+    "dbt-postgres>=1.9",
 ]
 dev = [
     "pytest>=8.3",

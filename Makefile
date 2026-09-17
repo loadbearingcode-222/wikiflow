@@ -11,7 +11,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 
-.PHONY: help env hooks build up down restart ps logs shell test test-container lint format typecheck check reset pin-images
+.PHONY: help env hooks build up down restart ps logs shell test test-container lint format typecheck check reprocess pg-sync parity reset pin-images
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -34,6 +34,8 @@ up: env  ## Build (if changed) and start the whole stack
 	@echo ""
 	@echo "  Airflow UI  ->  http://localhost:8080   (airflow / airflow)"
 	@echo "  MinIO       ->  http://localhost:9001"
+	@echo "  Dashboard   ->  http://localhost:8501"
+	@echo "  Postgres    ->  localhost:5433   (wikiflow / wikiflow_dev_secret)"
 	@echo ""
 
 down:  ## Stop the stack, keep volumes
@@ -76,6 +78,17 @@ typecheck:  ## Type-check src/ and tests/
 	uv run mypy
 
 check: lint typecheck test  ## Everything CI runs, locally
+
+# --- data operations (run inside the stack) --------------------------------------
+
+reprocess:  ## Rebuild bronze from raw, no download: make reprocess FROM=2026-09-14T00 TO=2026-09-14T23
+	$(COMPOSE) exec airflow-scheduler python -m wikiflow.reprocess --start $(FROM) --end $(TO)
+
+pg-sync:  ## Load new or rewritten bronze partitions into the Postgres warehouse
+	$(COMPOSE) exec airflow-scheduler python -m wikiflow.postgres_load
+
+parity:  ## Compare every mart in DuckDB and Postgres, row by row
+	$(COMPOSE) exec airflow-scheduler python -m wikiflow.parity
 
 # --- housekeeping ------------------------------------------------------------
 reset:  ## Destroy the stack INCLUDING volumes (wipes metadata db and MinIO data)

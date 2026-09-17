@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,9 +36,11 @@ from wikiflow.audit import IngestionAudit, write_audit
 from wikiflow.config import get_settings
 from wikiflow.download import DownloadResult, download_dump
 from wikiflow.extract import ExtractionResult, extract_hour
+from wikiflow.redirects import resolve_filter
+from wikiflow.reference import FilterCounts, load_current, publish
+from wikiflow.reprocess import publish_bronze
 from wikiflow.source import HourlyDump
 from wikiflow.storage import overwrite_partition
-from wikiflow.wikidata import CompanyPage, load_companies, resolve_company_pages
 from wikiflow_airflow.assets import BRONZE_COMPANY_PAGEVIEWS, BRONZE_DOMAIN_TOTALS
 from wikiflow_airflow.pools import WIKIMEDIA_DUMPS_POOL
 
@@ -175,22 +176,27 @@ def pageviews_ingest() -> None:
     )
 
     @task
-    def load_company_filter() -> list[dict[str, Any]]:
-        """Resolve tracked companies into (domain_code, page_title) pairs."""
-        pages = resolve_company_pages(load_companies(COMPANY_SEED))
-        if not pages:
-            raise ValueError(
-                "company filter resolved to zero pages - Wikidata lookup likely failed. "
-                "Failing here rather than silently ingesting an empty narrow grain."
-            )
-        # CompanyPage uses slots=True, so it has no __dict__; asdict() is required.
-        return [asdict(page) for page in pages]
+    def ensure_company_filter() -> dict[str, int]:
+        """Make sure a published company filter exists, and report its size.
+
+        The filter is resolved daily by company_pages_refresh, not here: with redirects
+        it takes a few hundred MediaWiki requests (wikiflow.reference). On a fresh stack
+        nothing has been published yet, so the first run resolves and publishes it
+        rather than failing - the same code the refresh DAG runs.
+        """
+        pages = load_current()
+        if pages is None:
+            log.info("no published company filter yet; resolving and publishing one")
+            pages = resolve_filter(COMPANY_SEED)
+            publish(pages)
+        counts = FilterCounts.of(pages)
+        return {"articles": counts.articles, "rows": counts.total}
 
     # Two sequential downloads per task, one connection at a time. The pool - not
     # max_active_runs - is what bounds concurrent connections across backfill,
     # scheduled and manual runs together. See wikiflow_airflow.pools.
     @task(pool=WIKIMEDIA_DUMPS_POOL)
-    def ingest(spec: dict[str, str], filter_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def ingest(spec: dict[str, str], filter_counts: dict[str, int]) -> dict[str, Any]:
         """Download, verify, land raw, extract both grains, publish bronze.
 
         Writes an audit record on the way out whether or not it succeeded. A failed
@@ -199,7 +205,11 @@ def pageviews_ingest() -> None:
         """
         settings = get_settings()
         dump = HourlyDump.for_interval(pendulum.parse(spec["interval_start"]))
-        pages = [CompanyPage(**row) for row in filter_rows]
+        # Read here rather than passed through XCom: ~9,000 rows is too much to push
+        # through the metadata database on every run.
+        pages = load_current()
+        if not pages:
+            raise ValueError("the published company filter is missing or empty")
 
         started_at = datetime.now(UTC)
         downloaded: DownloadResult | None = None
@@ -242,17 +252,7 @@ def pageviews_ingest() -> None:
                     expected_lines=downloaded.line_count,
                 )
 
-                for grain, path in (
-                    ("company_pageviews", extracted.company_path),
-                    ("domain_totals", extracted.domain_path),
-                ):
-                    prefix = f"bronze/{grain}/{dump.partition_path}/"
-                    overwrite_partition(
-                        path,
-                        bucket=settings.lake_bucket,
-                        partition_prefix=prefix,
-                        key=f"{prefix}part-0.parquet",
-                    )
+                publish_bronze(extracted, dump)
 
             status = "success"
             return {
@@ -298,7 +298,7 @@ def pageviews_ingest() -> None:
 
     spec = resolve_dump()
     wait_for_publication >> spec
-    verify(ingest(spec, load_company_filter()))
+    verify(ingest(spec, ensure_company_filter()))
 
 
 pageviews_ingest()
