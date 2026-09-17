@@ -39,6 +39,7 @@ import duckdb
 import psycopg
 
 from wikiflow.config import get_settings
+from wikiflow.contracts import CompanyPageviewRecord, DomainTotalRecord, postgres_columns
 from wikiflow.storage import configure_duckdb_s3, s3_client
 
 log = logging.getLogger(__name__)
@@ -64,47 +65,19 @@ _PARTITION_COLUMNS = (
 )
 
 DATASETS: tuple[Dataset, ...] = (
+    # Bronze tables follow the data contract, so a column added there is added here.
     Dataset(
         name="bronze.company_pageviews",
         bucket_setting="lake_bucket",
         prefix="bronze/company_pageviews/",
-        columns=(
-            *_PARTITION_COLUMNS,
-            ("interval_start_utc", "timestamp"),
-            ("source_url", "text"),
-            ("ingested_at", "timestamptz"),
-            ("qid", "text"),
-            ("company_name", "text"),
-            ("language", "text"),
-            ("project", "text"),
-            ("access_method", "text"),
-            ("match_type", "text"),
-            ("canonical_title", "text"),
-            ("domain_code", "text"),
-            ("page_title", "text"),
-            ("count_views", "bigint"),
-            ("total_response_size", "bigint"),
-        ),
+        columns=postgres_columns(CompanyPageviewRecord),
         reader="read_parquet('{url}', hive_partitioning = false)",
     ),
     Dataset(
         name="bronze.domain_totals",
         bucket_setting="lake_bucket",
         prefix="bronze/domain_totals/",
-        columns=(
-            *_PARTITION_COLUMNS,
-            ("interval_start_utc", "timestamp"),
-            ("source_url", "text"),
-            ("ingested_at", "timestamptz"),
-            ("domain_code", "text"),
-            ("project", "text"),
-            ("language", "text"),
-            ("access_method", "text"),
-            ("is_parseable", "boolean"),
-            ("views", "bigint"),
-            ("response_bytes", "bigint"),
-            ("distinct_pages", "bigint"),
-        ),
+        columns=postgres_columns(DomainTotalRecord),
         reader="read_parquet('{url}', hive_partitioning = false)",
     ),
     # Wikimedia's own totals: the reconciliation oracle. Its partition keys live only in

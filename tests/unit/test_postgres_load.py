@@ -117,3 +117,48 @@ def test_every_declared_type_has_a_duckdb_cast() -> None:
     for dataset in DATASETS:
         for name, pg_type in dataset.columns:
             assert pg_type.removesuffix(" not null") in _DUCKDB_TYPES, (dataset.name, name)
+
+
+@pytest.fixture
+def two_fact_tables() -> duckdb.DuckDBPyConnection:
+    connection = duckdb.connect()
+    for schema in ("duck", "pg"):
+        connection.execute(f"CREATE SCHEMA {schema}")
+        connection.execute(
+            f"""
+            CREATE TABLE {schema}.fct AS SELECT * FROM (VALUES
+              (DATE '2026-09-14', 4, TIMESTAMPTZ '2026-09-17 04:09:24+00', 'Q312', 10),
+              (DATE '2026-09-14', 4, TIMESTAMPTZ '2026-09-17 04:09:24+00', 'Q95',  20),
+              (DATE '2026-09-14', 5, TIMESTAMPTZ '2026-09-17 04:09:28+00', 'Q312', 30)
+            ) AS t(view_date, view_hour, ingested_at, company_qid, views)
+            """
+        )
+    return connection
+
+
+@pytest.mark.unit
+def test_same_bronze_writes_are_comparable(two_fact_tables: duckdb.DuckDBPyConnection) -> None:
+    from wikiflow.parity import bronze_versions_differ
+
+    assert bronze_versions_differ(two_fact_tables, "duck.fct", "pg.fct") == 0
+
+
+@pytest.mark.unit
+def test_a_warehouse_that_has_not_caught_up_is_not_comparable(
+    two_fact_tables: duckdb.DuckDBPyConnection,
+) -> None:
+    """Hour 5 rewritten and rebuilt in DuckDB only; hour 6 built in DuckDB only.
+
+    Both are timing, not a defect - and must not be reported as a data mismatch.
+    """
+    from wikiflow.parity import bronze_versions_differ
+
+    c = two_fact_tables
+    c.execute(
+        "UPDATE duck.fct SET ingested_at = TIMESTAMPTZ '2026-09-17 04:41:42+00' WHERE view_hour = 5"
+    )
+    c.execute(
+        "INSERT INTO duck.fct VALUES (DATE '2026-09-14', 6, TIMESTAMPTZ '2026-09-17 05:00:00+00', 'Q95', 5)"
+    )
+    # hour 5: one version on each side (2), hour 6: only in DuckDB (1)
+    assert bronze_versions_differ(c, "duck.fct", "pg.fct") == 3

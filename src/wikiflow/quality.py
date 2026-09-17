@@ -4,7 +4,7 @@ The dbt tests assert that the data is internally consistent and reconciles with
 Wikimedia's own totals. These checks are about a different question: whether the data
 is *there*, *recent*, and *plausible*.
 
-Three checks, each catching a failure the others cannot:
+Four checks, each catching a failure the others cannot:
 
 * **Gaps** — a missing hour. The pipeline cannot report this itself, because a run that
   never happened produces no failure. Only something that looks across the range can
@@ -16,6 +16,9 @@ Three checks, each catching a failure the others cannot:
   against the previous hour. Wikipedia traffic swings about 1.6x across a day, so a
   naive hour-over-hour check fires every morning and every evening, and people learn to
   ignore it.
+* **Warehouse lag** — the Postgres marts stopped keeping up with bronze (ADR 0008). A
+  failing transform DAG alerts on its own, but a DAG that is paused, or never triggered,
+  fails nothing.
 """
 
 from __future__ import annotations
@@ -105,6 +108,72 @@ class AnomalyReport:
             f"{worst.interval_start:%Y-%m-%d %H:00} at {worst.deviation:+.1f} sigma "
             f"({worst.views:,} views vs expected {worst.expected:,.0f})"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class WarehouseLagReport:
+    warehouse: str
+    bronze_latest: datetime | None
+    warehouse_latest: datetime | None
+    threshold: timedelta
+
+    @property
+    def lag(self) -> timedelta | None:
+        """None when the warehouse has nothing at all while bronze does."""
+        if self.bronze_latest is None:
+            return timedelta(0)
+        if self.warehouse_latest is None:
+            return None
+        return max(timedelta(0), self.bronze_latest - self.warehouse_latest)
+
+    @property
+    def is_current(self) -> bool:
+        return self.lag is not None and self.lag <= self.threshold
+
+    def summary(self) -> str:
+        if self.bronze_latest is None:
+            return f"{self.warehouse}: bronze is empty; nothing to lag behind"
+        if self.warehouse_latest is None:
+            return (
+                f"{self.warehouse}: marts are EMPTY while bronze reaches "
+                f"{self.bronze_latest:%Y-%m-%d %H:00}"
+            )
+        return (
+            f"{self.warehouse}: newest hour {self.warehouse_latest:%Y-%m-%d %H:00}, bronze "
+            f"{self.bronze_latest:%Y-%m-%d %H:00}, lag {self.lag}, threshold {self.threshold}"
+        )
+
+
+def check_postgres_lag(*, max_lag: timedelta, conninfo: str | None = None) -> WarehouseLagReport:
+    """How far do the Postgres marts trail the newest bronze partition?
+
+    Measured against bronze rather than the clock, so a stall in ingestion - already
+    reported by the freshness check - is not reported a second time as warehouse lag.
+    A marts table that does not exist yet counts as empty, not as an error.
+    """
+    import psycopg
+
+    present = _partitions_present("company_pageviews")
+    bronze_latest = max(present) if present else None
+
+    warehouse_latest: datetime | None = None
+    with psycopg.connect(conninfo or get_settings().pg_conninfo) as connection:
+        exists = connection.execute(
+            "select to_regclass('public_marts.fct_company_pageviews_hourly') is not null"
+        ).fetchone()
+        if exists and exists[0]:
+            row = connection.execute(
+                "select max(interval_start_utc) from public_marts.fct_company_pageviews_hourly"
+            ).fetchone()
+            if row and row[0] is not None:
+                warehouse_latest = row[0].replace(tzinfo=UTC)
+
+    return WarehouseLagReport(
+        warehouse="postgres",
+        bronze_latest=bronze_latest,
+        warehouse_latest=warehouse_latest,
+        threshold=max_lag,
+    )
 
 
 def _partitions_present(grain: str) -> set[datetime]:

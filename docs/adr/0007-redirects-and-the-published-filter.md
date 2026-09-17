@@ -78,6 +78,15 @@ took 2m42s.
 Requests to MediaWiki are **serial** and send `maxlag=5`, as Wikimedia's API etiquette
 asks. A `maxlag` refusal or a 429 is waited out exactly as long as `Retry-After` says.
 
+### Every hour records which filter it was extracted with
+
+Keeping every snapshot is only useful if you can tell which one an hour used. Each snapshot
+file names itself in a `snapshot_key` column, including the `current.parquet` copy. The
+ingest task and the reprocess both write that key into the hour's audit record
+(`filter_snapshot`). So after the filter changes, the exact filter behind any hour can be
+found. This holds for hours ingested from 2026-09-17 on; earlier audit records predate
+the field and show none.
+
 ### A shrinking filter is refused
 
 `publish` refuses a snapshot that has lost more than 10% of the current one's article
@@ -128,3 +137,11 @@ hour), re-verifying each file and writing an audit record per hour under its own
   already ingested are not re-extracted unless reprocessed.
 - Redirects to a section (`Apple_Inc.#History`) are included: the reader landed on the
   article.
+
+## Addendum — the guard, exercised
+
+The shrink guard was tested against the live filter, not only in unit tests. A refresh was
+simulated in which Wikidata answered but every redirect lookup came back empty: 8,742 rows
+dropped to 2,240, with all 2,240 articles intact. `publish` refused in 0.08 s with
+`rows fell from 8,742 to 2,240 (74.4%, limit 10%)`. `current.parquet` kept its ETag, and
+the snapshot count stayed at 3. Full write-up: `docs/FAILURE_DRILLS.md`, drill 4.

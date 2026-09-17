@@ -186,3 +186,73 @@ days ahead, so every raw partition appears expired.
 **Result:** nothing deleted. The guard exists because retention is the only component
 whose bug destroys data rather than producing a wrong answer, and a sweep that finds
 *everything* expired is far more likely to be misconfigured than correct.
+
+---
+
+## Drill 4 — the filter refresh loses the redirects
+
+**Question:** if a daily refresh comes back without the redirects, as it would during a
+MediaWiki outage while Wikidata still answers, does the smaller filter get published?
+
+**Why it is the dangerous case:** every article is still there. A guard that counted only
+articles would pass it, while every hour ingested afterwards silently lost about 2.7% of
+company views (ADR 0007). Nothing downstream could tell that from a quiet day.
+
+**Method:** take the live published filter, keep only its article rows, and call
+`publish` against the real object store.
+
+| Step | Result |
+|---|---|
+| Current filter | 2,240 articles, 8,742 rows |
+| Simulated refresh | 2,240 articles, 2,240 rows |
+| `publish` | **Refused in 0.08 s:** *"rows fell from 8,742 to 2,240 (74.4%, limit 10%)"* |
+| `current.parquet` | Same ETag as before |
+| Snapshots | 3 before, 3 after |
+
+**Result:** nothing published, and ingestion keeps using the full filter. The refusal
+happens before any write, so there is no half-published state to clean up.
+
+---
+
+## Drill 5 — the Postgres load dies half-way through a partition
+
+**Question:** the loader deletes an hour and then copies its rows back in, on a connection
+in autocommit mode. If the connection dies between the two, is the hour gone?
+
+**Method:** in the live warehouse, reload `bronze.domain_totals` for 2026-09-15 09:00. The
+copy is made to raise after 999 rows, once the DELETE has already run. Then compare the
+partition and its manifest row with their state before.
+
+| | Rows | Views | Manifest ETag | Loaded at |
+|---|---:|---:|---|---|
+| Before | 1,949 | 16,180,602 | `3f461919…` | 04:13:19.90 |
+| Load fails after 999 rows | | | | |
+| After | 1,949 | 16,180,602 | `3f461919…` | 04:13:19.90 |
+
+The next `sync` loaded 0 partitions and reported 162 unchanged. Parity against DuckDB:
+identical.
+
+**Result:** the DELETE rolled back with the COPY. The explicit per-partition transaction
+does wrap both, even on an autocommit connection. The manifest never recorded the ETag
+that the failed load was carrying, so a failed load cannot be mistaken for a completed
+one. The view total matches the lost-partition drill (drill 2) for the same hour: two
+independent paths, one number.
+
+The same scenario is now part of the CI end-to-end test.
+
+---
+
+## A test that passed for the wrong reason
+
+Not a drill against the pipeline, but against its tests, and worth recording for the same
+reason.
+
+The end-to-end test for "a rewritten hour reaches the marts" passed on its first run. It
+was then run against the rule it was written to replace, the old `view_date` watermark.
+**It passed there too.** Both fixture hours were on the same date, and the old rule
+rebuilds every hour of the newest date regardless. The test could not fail, so it proved
+nothing.
+
+With the rewritten hour moved to an earlier date, the test fails against the old rule
+(its "not comparable yet" check finds the warehouses disagreeing) and passes against the
+new one. Every test of a fix since then has been run once against the unfixed code first.

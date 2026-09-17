@@ -8,6 +8,8 @@ sources:
       volume (tens of KB per hour) never justifies a copy.
     meta:
       written_by: dags/pageviews_ingest.py
+    # Bucket names come from the same environment variables the pipeline uses, so the
+    # end-to-end test can build against its own buckets without touching real data.
 
     tables:
       - name: company_pageviews
@@ -22,7 +24,7 @@ sources:
           # redirect resolution (ADR 0007). Without it, a partition written before then
           # makes the scan fail, or - worse - aligns columns by position.
           external_location: >-
-            read_parquet('s3://wikiflow-lake/bronze/company_pageviews/dt=*/hour=*/*.parquet',
+            read_parquet('s3://{{ env_var('WIKIFLOW_LAKE_BUCKET', 'wikiflow-lake') }}/bronze/company_pageviews/dt=*/hour=*/*.parquet',
                          hive_partitioning=false, union_by_name=true)
 
       - name: domain_totals
@@ -31,7 +33,7 @@ sources:
           share-of-traffic, and the key that reconciles against projectviews.
         meta:
           external_location: >-
-            read_parquet('s3://wikiflow-lake/bronze/domain_totals/dt=*/hour=*/*.parquet',
+            read_parquet('s3://{{ env_var('WIKIFLOW_LAKE_BUCKET', 'wikiflow-lake') }}/bronze/domain_totals/dt=*/hour=*/*.parquet',
                          hive_partitioning=false)
 
   - name: raw
@@ -46,7 +48,7 @@ sources:
           # names=/types= rather than columns={...}: dbt-duckdb format_maps this string,
           # so literal braces would be parsed as placeholders and raise a KeyError.
           external_location: >-
-            read_csv('s3://wikiflow-raw/projectviews/dt=*/hour=*/projectviews-*',
+            read_csv('s3://{{ env_var('WIKIFLOW_RAW_BUCKET', 'wikiflow-raw') }}/projectviews/dt=*/hour=*/projectviews-*',
                      delim=' ', header=false, quote='',
                      names=['domain_code', 'page_title', 'count_views', 'total_response_size'],
                      types=['VARCHAR', 'VARCHAR', 'BIGINT', 'BIGINT'],

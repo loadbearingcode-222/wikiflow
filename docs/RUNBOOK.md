@@ -102,6 +102,31 @@ and it was a cause of this incident.
 
 ---
 
+## `pageviews_ingest` — `ContractViolation`
+
+**Means:** extraction produced a partition that does not match the bronze data contract
+(ADR 0009), and **refused to publish it**. Bronze still holds the previous version of that
+hour, or nothing if it is new.
+
+The message names the model, the number of violations, and the first five with the row
+and value. For example:
+
+```
+domain_totals.parquet: 1 contract violation(s) in 1,954 rows against DomainTotalRecord
+  row 17, views: Input should be a valid integer (got 3882.0)
+```
+
+| Kind | Likely cause |
+|---|---|
+| `columns do not match` | Extraction's `SELECT` changed without `wikiflow/contracts.py`, or the reverse. Change both, in one commit |
+| A type error (`valid integer`, `valid string`) | A cast was lost in extraction SQL, as with the DOUBLE sums before Phase 5 |
+| `not in partition dt=…/hour=…` | The dump was attributed to the wrong hour; see ADR 0001 |
+| `match_type` / `access_method` / `qid` | The company filter contains a bad row; check the latest snapshot |
+
+Do not loosen the contract to make an hour pass. Fix the cause, then re-run the hour.
+
+---
+
 ## `pageviews_ingest` — zero company rows
 
 **Symptom:** `verify` raises "produced zero company rows".
@@ -282,6 +307,17 @@ since the last load, each in its own transaction:
 make pg-sync
 ```
 
+**`warehouse_parity` failed.** Read the log's first line:
+
+| Log says | Means | Action |
+|---|---|---|
+| `not comparable yet: N hour(s)…` | One warehouse built bronze writes the other has not yet. Timing, not a defect | Nothing: the task retries every 20 minutes. If retries run out, one transform DAG has stopped; check `pageviews_quality`'s Postgres lag result |
+| `marts DIFFER` | Both built from the same bronze, and the data disagrees | A defect, and the task does not retry. The table names the mart; compare its rows in both warehouses. Most likely a model or dialect macro that behaves differently on one target |
+
+**`pageviews_quality` — postgres lag.** The Postgres marts trail the newest bronze hour by
+more than 2 hours, or are empty. Check `pageviews_transform_postgres` is unpaused and its
+last runs succeeded; then `make pg-sync` and trigger it.
+
 **Do the two warehouses agree?**
 
 ```bash
@@ -327,11 +363,12 @@ make reprocess FROM=2026-09-14T00 TO=2026-09-15T23      # Windows: .\make.ps1 re
 ```
 
 Hours with no raw file are skipped and listed. Reprocessing does not publish an Airflow
-Asset, so rebuild the marts afterwards. An incremental build only looks at recent hours,
-so use a full refresh:
+Asset, so trigger both transform DAGs afterwards. No full refresh is needed: the marts
+pick up every hour whose bronze was rewritten (ADR 0008, addendum).
 
 ```bash
-docker compose exec airflow-scheduler /home/airflow/dbt-venv/bin/dbt build   --project-dir /opt/airflow/dbt --profiles-dir /opt/airflow/dbt --target prod --full-refresh
+docker compose exec airflow-scheduler airflow dags trigger pageviews_transform
+docker compose exec airflow-scheduler airflow dags trigger pageviews_transform_postgres
 ```
 
 **Rebuild the marts from scratch:**

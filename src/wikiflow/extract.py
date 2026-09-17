@@ -32,6 +32,7 @@ from typing import Any
 
 import duckdb
 
+from wikiflow.contracts import CompanyPageviewRecord, DomainTotalRecord, validate_partition
 from wikiflow.parsing import UnparseableDomainCode, parse_domain_code
 from wikiflow.source import HourlyDump
 from wikiflow.wikidata import CompanyPage
@@ -209,6 +210,11 @@ def extract_hour(
 
         _write_partition(connection, "domain_totals", domain_path, dump, source)
         _write_partition(connection, "company_pageviews", company_path, dump, source)
+
+        # The data contract, enforced before the files can be published: every row of
+        # both grains, strictly typed. See wikiflow.contracts.
+        validate_partition(domain_path, DomainTotalRecord)
+        validate_partition(company_path, CompanyPageviewRecord)
 
         domain_rows, total_views = _row(
             connection, "SELECT count(*), coalesce(sum(views), 0) FROM domain_totals"

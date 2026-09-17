@@ -8,7 +8,8 @@ looks across the whole range instead, and catches the failures that produce no e
   raises nothing;
 * ingestion having silently stopped, where everything present is correct and there is
   simply nothing new;
-* an hour that arrived at the wrong size.
+* an hour that arrived at the wrong size;
+* the Postgres marts no longer keeping up with bronze (ADR 0008).
 
 Checks are reported together rather than failing on the first problem, so one run tells
 you everything that is wrong rather than only the first thing.
@@ -24,6 +25,7 @@ from airflow.sdk import dag, task
 from wikiflow.quality import (
     DataQualityError,
     check_freshness,
+    check_postgres_lag,
     detect_gaps,
     detect_volume_anomalies,
 )
@@ -42,10 +44,15 @@ FRESHNESS_THRESHOLD = timedelta(hours=8)
 #: something interesting happening in the world.
 SIGMA_THRESHOLD = 4.0
 
+#: How far the Postgres marts may trail the newest bronze hour. The transform DAG is
+#: triggered within seconds of each ingest and takes under a minute, so two hours of lag
+#: means it has stopped - paused, failing, or never triggered - not that it is slow.
+POSTGRES_LAG_THRESHOLD = timedelta(hours=2)
+
 
 @dag(
     dag_id="pageviews_quality",
-    description="Gap, freshness and volume checks across the bronze layer",
+    description="Gap, freshness, volume and warehouse-lag checks",
     schedule="30 * * * *",
     start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
     catchup=False,
@@ -86,6 +93,17 @@ def pageviews_quality() -> None:
         }
 
     @task
+    def check_postgres() -> dict[str, object]:
+        try:
+            report = check_postgres_lag(max_lag=POSTGRES_LAG_THRESHOLD)
+        except Exception as exc:  # an unreachable warehouse is a finding, not a crash
+            detail = f"postgres: could not be checked ({type(exc).__name__}: {exc})"
+            print(detail)
+            return {"ok": False, "detail": detail}
+        print(report.summary())
+        return {"ok": report.is_current, "detail": report.summary()}
+
+    @task
     def report(*results: dict[str, object]) -> None:
         """Fail once, naming every check that failed.
 
@@ -105,7 +123,7 @@ def pageviews_quality() -> None:
 
         print(f"all {len(results)} checks passed")
 
-    report(check_gaps(), check_fresh(), check_volume())
+    report(check_gaps(), check_fresh(), check_volume(), check_postgres())
 
 
 pageviews_quality()

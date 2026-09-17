@@ -155,3 +155,67 @@ should be rebuilt, not patched.
 - The dashboard still reads DuckDB, and its queries in `wikiflow.metrics` use DuckDB
   syntax (`unnest(?::VARCHAR[])`, `::DOUBLE`). Pointing it at Postgres would mean
   porting those queries too, not just changing the connection.
+
+## Addendum — closing the gaps a review found
+
+A review of this ADR against the code found three places where the design claimed more
+than the automation delivered. All three are fixed.
+
+### Rewritten hours now reach the marts without a full refresh
+
+The loader noticed a rewritten hour, but the fact table did not. It watermarked on
+`view_date`, so a reprocessed hour on an earlier date landed in bronze and in Postgres'
+copy of bronze, and changed no mart in either warehouse. Parity passed that day only
+because both warehouses had been fully refreshed by hand.
+
+`fct_company_pageviews_hourly` now carries each hour's `ingested_at` and selects rows
+written after the newest one it holds. It uses the same rule as the loader: *changed*,
+not *newer in time*. The watermark overlaps by one hour, because two ingest runs overlap.
+An hour extracted slightly earlier can finish uploading after a build has already moved
+past it, and re-selecting a recent hour is free under `delete+insert`.
+
+Proven on real data: 2026-09-14 05:00 was rebuilt from raw. Ordinary incremental builds
+on both warehouses then replaced exactly that hour (new `ingested_at`, still 417 rows),
+left 04:00 untouched, and the loader moved 2 of 162 partitions. Parity stayed identical.
+
+### CI now covers the Postgres path
+
+Until now, CI never ran the loader against a database, never built `--target pg`, and
+never ran parity. `tests/e2e/test_two_warehouses.py` does all of that in its own buckets
+and database, refusing to run against the real ones, and CI starts MinIO and Postgres for
+it. It covers:
+
+- the build and every test on both targets;
+- row-for-row parity;
+- a rewritten hour on an *earlier date* flowing through incremental builds;
+- the loader moving only the 2 changed partitions;
+- a load failing half-way through a partition.
+
+The test itself needed a fix, found by running it against the rule it replaces. With both
+fixture hours on the same date, **it passed under the old `view_date` watermark too**,
+because that rule rebuilds every hour of the newest date anyway. The rewritten hour now
+sits on an earlier date. Against the old rule the test fails; against the new rule it
+passes.
+
+### Parity runs daily, and "behind" is not "wrong"
+
+`warehouse_parity` runs the comparison daily. First it checks whether the two fact tables
+were built from the same writes of bronze: the same hours, at the same `ingested_at`.
+If not, one warehouse simply has not caught up. That outcome is *not comparable yet*,
+and the task retries in 20 minutes. If both were built from the same bronze and still
+differ, that is a defect: the task fails without retrying. It holds the `dbt_project`
+pool's slot while reading, so no build in either warehouse runs underneath it.
+
+`pageviews_quality` gained a fourth check: how far the Postgres marts trail the newest
+bronze hour, failing past two hours. A transform DAG that fails alerts on its own. One
+that is paused, or never triggered, fails nothing, and only this check would notice.
+
+### A failed load, exercised
+
+The claim above that "a failure rolls back all three" is now tested, not asserted. The
+loader's connection is in autocommit mode, so if the explicit transaction did not really
+wrap the DELETE, a failure would lose a whole hour. On the live warehouse, reloading
+2026-09-15 09:00 was made to die after copying 999 of 1,949 rows, after the DELETE had
+run. Afterwards the partition held its 1,949 rows and 16,180,602 views, and the manifest
+kept its ETag and load time. The next sync found nothing to repair. The same scenario runs
+in CI. Full write-up: `docs/FAILURE_DRILLS.md`, drill 5.

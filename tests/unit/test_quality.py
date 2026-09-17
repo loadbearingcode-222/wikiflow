@@ -191,3 +191,49 @@ def test_identical_hours_do_not_divide_by_zero(tmp_path: Path) -> None:
     report = detect_volume_anomalies(source=write_hourly(tmp_path, rows), min_history=3)
 
     assert report.anomalies == ()
+
+
+# ---------------------------------------------------------------- warehouse lag
+
+
+@pytest.mark.unit
+def test_postgres_within_threshold_is_current() -> None:
+    from wikiflow.quality import WarehouseLagReport
+
+    report = WarehouseLagReport(
+        warehouse="postgres",
+        bronze_latest=datetime(2026, 9, 17, 5, tzinfo=UTC),
+        warehouse_latest=datetime(2026, 9, 17, 4, tzinfo=UTC),
+        threshold=timedelta(hours=2),
+    )
+    assert report.is_current
+    assert report.lag == timedelta(hours=1)
+
+
+@pytest.mark.unit
+def test_postgres_behind_by_more_than_threshold_fails() -> None:
+    from wikiflow.quality import WarehouseLagReport
+
+    report = WarehouseLagReport(
+        warehouse="postgres",
+        bronze_latest=datetime(2026, 9, 17, 5, tzinfo=UTC),
+        warehouse_latest=datetime(2026, 9, 16, 22, tzinfo=UTC),
+        threshold=timedelta(hours=2),
+    )
+    assert not report.is_current
+    assert "lag 7:00:00" in report.summary()
+
+
+@pytest.mark.unit
+def test_empty_marts_with_data_in_bronze_is_not_current() -> None:
+    """The case a lag in hours cannot express: the warehouse has nothing at all."""
+    from wikiflow.quality import WarehouseLagReport
+
+    report = WarehouseLagReport(
+        warehouse="postgres",
+        bronze_latest=datetime(2026, 9, 17, 5, tzinfo=UTC),
+        warehouse_latest=None,
+        threshold=timedelta(hours=2),
+    )
+    assert not report.is_current
+    assert "EMPTY" in report.summary()

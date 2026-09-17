@@ -165,6 +165,7 @@ def test_all_expected_dags_exist(dagbag) -> None:
         "raw_retention",
         "company_pages_refresh",
         "pageviews_transform_postgres",
+        "warehouse_parity",
     }
 
 
@@ -211,7 +212,12 @@ def test_quality_dag_reports_all_checks_together(dagbag) -> None:
     dag = dagbag.dags["pageviews_quality"]
     report = dag.get_task("report")
 
-    assert report.upstream_task_ids == {"check_gaps", "check_fresh", "check_volume"}
+    assert report.upstream_task_ids == {
+        "check_gaps",
+        "check_fresh",
+        "check_volume",
+        "check_postgres",
+    }
 
 
 @pytest.mark.dag
@@ -362,3 +368,20 @@ def test_dbt_is_installed_where_the_transform_dag_calls_it() -> None:
     assert result.returncode == 0, result.stderr
     assert "duckdb" in result.stdout, "the dbt-duckdb adapter is not installed"
     assert "postgres" in result.stdout, "the dbt-postgres adapter is not installed"
+
+
+@pytest.mark.dag
+def test_parity_holds_the_dbt_slot_while_it_reads(dagbag) -> None:
+    """Reading the DuckDB file during a dbt build can collide with its single writer."""
+    from wikiflow_airflow.pools import DBT_PROJECT_POOL
+
+    dag = dagbag.dags["warehouse_parity"]
+    assert dag.get_task("compare").pool == DBT_PROJECT_POOL
+    assert dag.default_args["retries"] >= 1, "not-comparable-yet must be retried"
+
+
+@pytest.mark.dag
+def test_quality_dag_checks_postgres_lag(dagbag) -> None:
+    dag = dagbag.dags["pageviews_quality"]
+    assert "check_postgres" in dag.task_ids
+    assert "check_postgres" in dag.get_task("report").upstream_task_ids

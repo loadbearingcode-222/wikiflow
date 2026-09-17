@@ -40,7 +40,7 @@ jobs:
   # Slow gate: builds the real Airflow image and imports every DAG. This is what
   # catches a DAG that only breaks at parse time in the scheduler.
   dags:
-    name: DAG integrity
+    name: DAG integrity + both warehouses end to end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,9 +54,22 @@ jobs:
       - name: Build the Airflow image
         run: docker compose build airflow-scheduler
 
-      - name: DAG + integration tests
+      # The end-to-end test needs object storage and the warehouse Postgres. It builds
+      # both warehouses from committed fixtures in its own buckets and database.
+      # The container runs as uid 50000, the checkout belongs to the runner. dbt writes
+      # dbt_packages/ and logs/ into the project directory, which it could not otherwise.
+      - name: Let the container write to the dbt project
+        run: chmod -R a+rwX dbt
+
+      - name: Start MinIO and the warehouse Postgres
+        run: docker compose up -d --wait minio warehouse-postgres
+
+      - name: DAG, integration and end-to-end tests
         # --entrypoint is required: the Airflow image entrypoint treats a bare
         # command as an `airflow` subcommand and prints CLI help instead.
+        # WIKIFLOW_E2E_REQUIRED=1 turns "services unreachable" into a failure; locally
+        # the e2e test skips instead.
         run: >
-          docker compose run --rm --no-deps --entrypoint pytest airflow-scheduler
-          /opt/airflow/tests -m "dag or integration" -ra
+          docker compose run --rm --no-deps -e WIKIFLOW_E2E_REQUIRED=1
+          --entrypoint pytest airflow-scheduler
+          /opt/airflow/tests -m "dag or integration or e2e" -ra

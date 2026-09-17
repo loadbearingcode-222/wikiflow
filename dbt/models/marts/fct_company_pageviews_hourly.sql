@@ -22,10 +22,18 @@ with pageviews as (
     select * from {{ ref('stg_company_pageviews') }}
 
     {% if is_incremental() %}
-    -- Only hours at or after the newest already loaded. Backfilling an OLDER hour is
-    -- done with --full-refresh or by targeting that partition, deliberately: silently
-    -- reprocessing everything would hide a backfill rather than surface it.
-    where view_date >= (select coalesce(max(view_date), DATE '1970-01-01') from {{ this }})
+    -- Every hour whose bronze partition was WRITTEN after the newest one already here -
+    -- not every hour that is newer in time. A reprocess or a recovered partition rewrites
+    -- an old hour, and a watermark on view_date never looked at it again: after the
+    -- redirect backfill (ADR 0007) both warehouses needed a manual --full-refresh.
+    --
+    -- The watermark is overlapped by an hour on purpose. Two ingest runs overlap, so an
+    -- hour extracted slightly earlier can finish uploading after a build has already
+    -- moved past it. Re-selecting a recent hour costs nothing: delete+insert replaces it.
+    where ingested_at > coalesce(
+        (select max(ingested_at) from {{ this }}),
+        cast('1970-01-01 00:00:00+00' as timestamp with time zone)
+    ) - interval '1 hour'
     {% endif %}
 
 )
@@ -48,6 +56,9 @@ select
     canonical_title,
 
     views,
-    response_bytes
+    response_bytes,
+
+    -- When the bronze partition was written. Drives the incremental rule above.
+    ingested_at
 
 from pageviews

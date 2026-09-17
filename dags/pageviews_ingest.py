@@ -84,6 +84,7 @@ def _record_audit(
     error: str | None,
     downloaded: DownloadResult | None,
     extracted: ExtractionResult | None,
+    filter_snapshot: str,
 ) -> None:
     """Persist one audit row. Never raises.
 
@@ -97,6 +98,7 @@ def _record_audit(
             run_id=str(context.get("run_id", "unknown")),
             dag_id="pageviews_ingest",
             task_id="ingest",
+            filter_snapshot=filter_snapshot,
             try_number=int(getattr(task_instance, "try_number", 1) or 1),
             interval_start=dump.interval_start,
             partition_date=dump.partition_date,
@@ -176,7 +178,7 @@ def pageviews_ingest() -> None:
     )
 
     @task
-    def ensure_company_filter() -> dict[str, int]:
+    def ensure_company_filter() -> dict[str, object]:
         """Make sure a published company filter exists, and report its size.
 
         The filter is resolved daily by company_pages_refresh, not here: with redirects
@@ -184,19 +186,24 @@ def pageviews_ingest() -> None:
         nothing has been published yet, so the first run resolves and publishes it
         rather than failing - the same code the refresh DAG runs.
         """
-        pages = load_current()
-        if pages is None:
+        current = load_current()
+        if current is None:
             log.info("no published company filter yet; resolving and publishing one")
-            pages = resolve_filter(COMPANY_SEED)
-            publish(pages)
-        counts = FilterCounts.of(pages)
-        return {"articles": counts.articles, "rows": counts.total}
+            publish(resolve_filter(COMPANY_SEED))
+            current = load_current()
+            assert current is not None
+        counts = FilterCounts.of(current.pages)
+        return {
+            "snapshot": current.snapshot_key,
+            "articles": counts.articles,
+            "rows": counts.total,
+        }
 
     # Two sequential downloads per task, one connection at a time. The pool - not
     # max_active_runs - is what bounds concurrent connections across backfill,
     # scheduled and manual runs together. See wikiflow_airflow.pools.
     @task(pool=WIKIMEDIA_DUMPS_POOL)
-    def ingest(spec: dict[str, str], filter_counts: dict[str, int]) -> dict[str, Any]:
+    def ingest(spec: dict[str, str], filter_counts: dict[str, object]) -> dict[str, Any]:
         """Download, verify, land raw, extract both grains, publish bronze.
 
         Writes an audit record on the way out whether or not it succeeded. A failed
@@ -207,9 +214,10 @@ def pageviews_ingest() -> None:
         dump = HourlyDump.for_interval(pendulum.parse(spec["interval_start"]))
         # Read here rather than passed through XCom: ~9,000 rows is too much to push
         # through the metadata database on every run.
-        pages = load_current()
-        if not pages:
+        published = load_current()
+        if published is None or not published.pages:
             raise ValueError("the published company filter is missing or empty")
+        pages = published.pages
 
         started_at = datetime.now(UTC)
         downloaded: DownloadResult | None = None
@@ -265,6 +273,7 @@ def pageviews_ingest() -> None:
                 "company_views": extracted.company_views,
                 "domain_rows": extracted.domain_rows,
                 "total_views": extracted.total_views,
+                "filter_snapshot": published.snapshot_key,
             }
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -277,6 +286,7 @@ def pageviews_ingest() -> None:
                 error=error,
                 downloaded=downloaded,
                 extracted=extracted,
+                filter_snapshot=published.snapshot_key,
             )
 
     @task(outlets=[BRONZE_COMPANY_PAGEVIEWS, BRONZE_DOMAIN_TOTALS])

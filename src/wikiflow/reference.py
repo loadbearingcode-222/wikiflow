@@ -11,7 +11,10 @@ reads the published copy:
     reference/company_pages/snapshots/20260917T020000Z.parquet   immutable, one per refresh
     reference/company_pages/current.parquet                      what ingestion reads
 
-Every snapshot is kept, so the filter any hour was ingested with can be recovered.
+Every snapshot is kept, and each file names itself in a `snapshot_key` column (the copy at
+`current.parquet` included). Ingestion records that key in the hour's audit record, so the
+exact filter any hour was extracted with can be found - for hours ingested from
+2026-09-17 on; earlier audit records predate the field.
 
 Publishing refuses a snapshot that is much SMALLER than the current one. A Wikidata
 outage that returned half the sitelinks, or a wiki that answered with nothing, would
@@ -86,7 +89,15 @@ def check_not_shrunk(
             )
 
 
-def write_pages_parquet(pages: list[CompanyPage], path: Path) -> None:
+@dataclass(frozen=True, slots=True)
+class PublishedFilter:
+    snapshot_key: str
+    """The immutable snapshot this filter was read from. Empty for a file published
+    before snapshots named themselves."""
+    pages: list[CompanyPage]
+
+
+def write_pages_parquet(pages: list[CompanyPage], path: Path, *, snapshot_key: str = "") -> None:
     """Write pages to Parquet, via CSV - DuckDB's fast path (see extract.py)."""
     with tempfile.TemporaryDirectory(prefix="wikiflow-reference-") as tmpdir:
         csv_path = Path(tmpdir) / "pages.csv"
@@ -108,8 +119,9 @@ def write_pages_parquet(pages: list[CompanyPage], path: Path) -> None:
                     -- quote AND escape explicit: titles contain `"` (Hebrew uses it
                     -- as an abbreviation mark, e.g. אלפבת_בע"מ), and the auto-detected
                     -- escape rejects the doubled quote that csv.writer produces.
-                    SELECT * FROM read_csv('{source}', header = true, quote = '"',
-                                           escape = '"', columns = {{{columns}}})
+                    SELECT *, '{snapshot_key.replace("'", "''")}' AS snapshot_key
+                    FROM read_csv('{source}', header = true, quote = '"',
+                                  escape = '"', columns = {{{columns}}})
                     ORDER BY domain_code, page_title
                 ) TO '{target}' (FORMAT PARQUET, COMPRESSION ZSTD)
                 """
@@ -118,12 +130,25 @@ def write_pages_parquet(pages: list[CompanyPage], path: Path) -> None:
             connection.close()
 
 
-def read_pages_parquet(path: Path) -> list[CompanyPage]:
+def read_pages_parquet(path: Path) -> PublishedFilter:
     connection = duckdb.connect()
     try:
+        present = {
+            row[0]
+            for row in connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)", [path.as_posix()]
+            ).fetchall()
+        }
         rows = connection.execute(
             f"SELECT {', '.join(PAGE_COLUMNS)} FROM read_parquet(?)", [path.as_posix()]
         ).fetchall()
+        key_row = (
+            connection.execute(
+                "SELECT any_value(snapshot_key) FROM read_parquet(?)", [path.as_posix()]
+            ).fetchone()
+            if "snapshot_key" in present
+            else None
+        )
     finally:
         connection.close()
     pages = []
@@ -132,10 +157,10 @@ def read_pages_parquet(path: Path) -> list[CompanyPage]:
         values = {k: ("" if v is None else v) for k, v in values.items()}
         values["language"] = values["language"] or None
         pages.append(CompanyPage(**values))
-    return pages
+    return PublishedFilter(snapshot_key=(key_row[0] or "") if key_row else "", pages=pages)
 
 
-def load_current() -> list[CompanyPage] | None:
+def load_current() -> PublishedFilter | None:
     """The published filter, or None if nothing has been published yet."""
     bucket = get_settings().lake_bucket
     if not object_exists(bucket, CURRENT_KEY):
@@ -160,7 +185,7 @@ def publish(
     resolved_at = resolved_at or datetime.now(UTC)
     current = load_current()
     check_not_shrunk(
-        FilterCounts.of(current) if current is not None else None,
+        FilterCounts.of(current.pages) if current is not None else None,
         FilterCounts.of(pages),
         max_ratio=max_ratio,
     )
@@ -169,7 +194,7 @@ def publish(
     key = snapshot_key(resolved_at)
     with tempfile.TemporaryDirectory(prefix="wikiflow-reference-") as tmpdir:
         local = Path(tmpdir) / "snapshot.parquet"
-        write_pages_parquet(pages, local)
+        write_pages_parquet(pages, local, snapshot_key=key)
         upload_file(local, bucket, key)
         upload_file(local, bucket, CURRENT_KEY)
     return key

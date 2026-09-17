@@ -93,7 +93,8 @@ def test_parquet_round_trip_preserves_awkward_titles(tmp_path: Path) -> None:
         ),
     ]
     path = tmp_path / "filter.parquet"
-    write_pages_parquet(pages, path)
-    assert sorted(read_pages_parquet(path), key=lambda p: p.qid) == sorted(
-        pages, key=lambda p: p.qid
-    )
+    key = "reference/company_pages/snapshots/20260917T040517Z.parquet"
+    write_pages_parquet(pages, path, snapshot_key=key)
+    published = read_pages_parquet(path)
+    assert published.snapshot_key == key, "a snapshot must name itself, so audit can cite it"
+    assert sorted(published.pages, key=lambda p: p.qid) == sorted(pages, key=lambda p: p.qid)

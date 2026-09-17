@@ -39,6 +39,16 @@ models:
               arguments:
                 min_value: 1
                 inclusive: true
+      - name: match_type
+        description: "`redirect` when the reader requested another title and landed here (ADR 0007)."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["sitelink", "redirect"]
+      - name: ingested_at
+        description: When the hour's bronze partition was written; the incremental watermark.
+        data_tests: [not_null]
 
   - name: agg_company_share_of_traffic
     description: Hourly company views as a share of all Wikimedia traffic.

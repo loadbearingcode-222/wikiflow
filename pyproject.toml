@@ -98,4 +98,5 @@ markers = [
     "unit: pure functions, no network, no Airflow, no containers",
     "dag: requires Airflow to be importable (container only)",
     "integration: requires MinIO/DuckDB; runs against committed fixtures",
+    "e2e: both warehouses end to end; needs MinIO and the warehouse Postgres (isolated buckets/database)",
 ]

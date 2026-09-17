@@ -54,6 +54,7 @@ switch ($Target.ToLowerInvariant()) {
             @('shell',          'Open a shell inside the scheduler container'),
             @('test',           'Run unit tests locally (fast, no containers)'),
             @('test-container', 'Run DAG + integration tests inside the container'),
+            @('test-e2e',       'Both warehouses end to end (isolated; stack must be up)'),
             @('lint',           'Check formatting and lint rules'),
             @('format',         'Auto-fix formatting and lint rules'),
             @('typecheck',      'Type-check src/ and tests/'),
@@ -87,6 +88,7 @@ switch ($Target.ToLowerInvariant()) {
     'shell'   { Compose @('exec', 'airflow-scheduler', 'bash') }
 
     'test'           { Uv @('run', 'pytest', 'tests/unit', '-m', 'unit') }
+    'test-e2e'       { Compose @('exec', '-e', 'WIKIFLOW_E2E_REQUIRED=1', 'airflow-scheduler', 'pytest', '/opt/airflow/tests', '-m', 'e2e') }
     'test-container' { Compose @('run', '--rm', '--no-deps', '--entrypoint', 'pytest', 'airflow-scheduler', '/opt/airflow/tests', '-m', 'dag or integration') }
 
     'lint'      { Uv @('run', 'ruff', 'check', '.'); Uv @('run', 'ruff', 'format', '--check', '.') }

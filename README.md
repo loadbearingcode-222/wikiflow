@@ -22,9 +22,11 @@ comes from, the linked document shows how.
 | **Correctness** | Our per-domain totals, computed independently from ~7M rows an hour, match Wikimedia's published `projectviews` **exactly** — 105,160 domain-hours, 988,785,027 views, zero mismatches |
 | **Portability** | The same dbt models build in DuckDB and Postgres, and every mart is **identical row for row** — 26,247 rows compared exactly, floats included ([ADR 0008](docs/adr/0008-a-second-warehouse.md)) |
 | **Completeness** | 2026-09-14 and 09-15: 48 of 48 hours. 2026-09-16: 6 of 24 so far, because the stack was offline, and the gap check reports it rather than hiding it |
+| **Contract** | Every published bronze row is first validated against a strict declared contract, at 24–62 ms a partition; the DOUBLE view counts that once slipped through now fail ([ADR 0009](docs/adr/0009-bronze-data-contract.md)) |
 | **Coverage** | Views arriving through redirects are counted: +2.7% overall, from +0.9% (Facebook) to +7.2% (Alphabet) ([ADR 0007](docs/adr/0007-redirects-and-the-published-filter.md)) |
 | **Integrity** | 0 unparseable lines across ~270 million; a truncated file is refused before anything is written |
-| **Idempotency** | Re-running an hour leaves the same rows and the same totals; a lost partition was restored identically in **21 s** ([drills](docs/FAILURE_DRILLS.md)). All 54 hours were rebuilt from raw, without re-downloading, in 3 min 35 s |
+| **Idempotency** | Re-running an hour leaves the same rows and the same totals; a lost partition was restored identically in **21 s** ([drills](docs/FAILURE_DRILLS.md)). All 54 hours were rebuilt from raw, without re-downloading, in 3 min 35 s, and a rewritten hour reaches both warehouses' marts by ordinary incremental builds |
+| **Atomicity** | A Postgres load killed after 999 of 1,949 rows left the partition and its manifest exactly as they were; the same failure runs in CI |
 | **Throughput** | DuckDB extracts both grains from 7,635,493 rows in **3.66 s using 201 MB**; the pandas equivalent takes 8.57 s and **1,922 MB** — identical output, median of 3 ([benchmark](scripts/benchmark_extraction.py)) |
 | **Operation** | 17–21 s to ingest an hour; an Airflow pool keeps the pipeline under the source's 3-connection limit |
 
@@ -51,7 +53,7 @@ watermark. That makes the important properties provable rather than hoped for:
 ## When things broke
 
 A pipeline that has only ever succeeded hasn't been tested. [`docs/FAILURE_DRILLS.md`](docs/FAILURE_DRILLS.md)
-covers one real incident and three deliberate drills, with measured results:
+covers one real incident and five deliberate drills, with measured results:
 
 - **Incident — rate-limited by the source.** Up to five concurrent downloads against a
   3-connections-per-IP limit produced `429 Too Many Requests`. Misdiagnosed twice before
@@ -62,6 +64,11 @@ covers one real incident and three deliberate drills, with measured results:
 - **A lost partition.** Detected by the gap check, restored identically. The drill also
   proved the documented recovery command wrong; the runbook is fixed.
 - **Retention misconfigured to expire everything.** Refused; 98 of 98 raw partitions kept.
+- **A filter refresh that lost every redirect.** Refused before any write: 8,742 rows would
+  have become 2,240 while every article survived.
+- **A warehouse load killed mid-partition.** Rolled back entirely, delete included.
+- **A test that could not fail.** The end-to-end test for rewritten hours passed against
+  the very bug it was written for. Now it fails there and passes on the fix.
 
 ---
 
@@ -102,6 +109,9 @@ The reasoning behind each is in [`docs/adr/`](docs/adr/).
 | A shrinking filter is refused | A MediaWiki outage loses the redirects and keeps the articles, which looks healthy by article count | Publishing whatever the lookup returned |
 | Load Postgres by ETag manifest | Reprocessing *rewrites* old hours, so "newer than the last hour loaded" misses them | A high-watermark on time |
 | Prove parity row by row | "It builds on both" shows the SQL compiles, not that the data matches | Comparing row counts |
+| Marts watermark on `ingested_at` | A rebuilt hour is *changed*, not *newer*; a `view_date` watermark never saw it | A manual `--full-refresh` after every reprocess |
+| Parity separates "behind" from "wrong" | Two independent transform DAGs are rarely at the same point, and timing is not a defect | Alerting on every difference, until people stop reading it |
+| A strict data contract at publication | A DOUBLE where an integer belonged passed every check for two phases | Coercing types, or checking only in dbt after publication |
 | No Airflow imports in `src/wikiflow` | Logic is testable without a scheduler; the unit suite runs in about 2 seconds | Logic inside DAG files |
 | Domain-code parsing in Python, not dbt | `.m` means three different things by position; two implementations would drift | Re-deriving it in SQL |
 | An Airflow pool for the source | `max_active_runs` is per DAG and counts run types separately; it did not prevent the incident | Relying on `max_active_runs` |
@@ -140,7 +150,8 @@ dumps.wikimedia.org  (hourly .gz, immutable; limit: 3 connections per IP)
    Streamlit dashboard  (reads marts, dbt run results, and the audit trail)
 
    independent DAGs:  company_pages_refresh  (daily: articles + redirects -> filter snapshot)
-                      pageviews_quality      (hourly: gaps, freshness, volume)
+                      pageviews_quality      (hourly: gaps, freshness, volume, Postgres lag)
+                      warehouse_parity       (daily: DuckDB vs Postgres, row by row)
                       raw_retention          (daily: dry-run manifest, then delete)
 ```
 
@@ -209,6 +220,7 @@ local network.
 ```bash
 make test             # unit tests, local, no containers
 make test-container   # DAG integrity, integration, and "is dbt really installed" checks
+make test-e2e         # both warehouses end to end, in isolated buckets and database
 make check            # lint + types + unit tests — what CI runs first
 ```
 

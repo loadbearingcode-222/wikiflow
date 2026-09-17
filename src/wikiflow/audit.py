@@ -57,6 +57,10 @@ class IngestionAudit:
 
     error: str | None = None
 
+    filter_snapshot: str = ""
+    """The company-filter snapshot extraction used (wikiflow.reference). Recorded so the
+    exact filter behind any hour can be recovered after the filter has since changed."""
+
     # Download verification (see wikiflow.download)
     compressed_bytes: int = 0
     decompressed_bytes: int = 0
@@ -121,6 +125,7 @@ AUDIT_SCHEMA: dict[str, str] = {
     "source_url": "VARCHAR",
     "status": "VARCHAR",
     "error": "VARCHAR",
+    "filter_snapshot": "VARCHAR",
     "compressed_bytes": "BIGINT",
     "decompressed_bytes": "BIGINT",
     "line_count": "BIGINT",

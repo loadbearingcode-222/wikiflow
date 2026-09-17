@@ -29,10 +29,9 @@ from wikiflow.audit import IngestionAudit, write_audit
 from wikiflow.config import get_settings
 from wikiflow.download import _scan_content
 from wikiflow.extract import ExtractionResult, extract_hour
-from wikiflow.reference import load_current
+from wikiflow.reference import PublishedFilter, load_current
 from wikiflow.source import HourlyDump
 from wikiflow.storage import object_exists, overwrite_partition, s3_client
-from wikiflow.wikidata import CompanyPage
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +61,9 @@ def hours(start: datetime, end: datetime) -> Iterator[datetime]:
         current += timedelta(hours=1)
 
 
-def reprocess_hour(dump: HourlyDump, pages: list[CompanyPage], *, run_id: str) -> ExtractionResult:
+def reprocess_hour(
+    dump: HourlyDump, published: PublishedFilter, *, run_id: str
+) -> ExtractionResult:
     settings = get_settings()
     started_at = datetime.now(UTC)
     status, error, extracted, lines, size = "failed", None, None, 0, 0
@@ -77,7 +78,7 @@ def reprocess_hour(dump: HourlyDump, pages: list[CompanyPage], *, run_id: str) -
             extracted = extract_hour(
                 source=str(local),
                 dump=dump,
-                company_pages=pages,
+                company_pages=published.pages,
                 output_dir=Path(tmpdir) / "bronze",
                 expected_lines=lines,
             )
@@ -94,6 +95,7 @@ def reprocess_hour(dump: HourlyDump, pages: list[CompanyPage], *, run_id: str) -
                     run_id=run_id,
                     dag_id=DAG_ID,
                     task_id="reprocess",
+                    filter_snapshot=published.snapshot_key,
                     try_number=1,
                     interval_start=dump.interval_start,
                     partition_date=dump.partition_date,
@@ -129,8 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    pages = load_current()
-    if not pages:
+    published = load_current()
+    if published is None or not published.pages:
         log.error("no published company filter - run the company_pages_refresh DAG first")
         return 2
 
@@ -145,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("%s: no raw file (never ingested, or past retention)", dump.partition_path)
             continue
         try:
-            result = reprocess_hour(dump, pages, run_id=run_id)
+            result = reprocess_hour(dump, published, run_id=run_id)
         except Exception as exc:
             failed.append(dump.partition_path)
             log.error("%s: FAILED - %s: %s", dump.partition_path, type(exc).__name__, exc)

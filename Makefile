@@ -11,7 +11,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 
-.PHONY: help env hooks build up down restart ps logs shell test test-container lint format typecheck check reprocess pg-sync parity reset pin-images
+.PHONY: help env hooks build up down restart ps logs shell test test-container test-e2e lint format typecheck check reprocess pg-sync parity reset pin-images
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -80,6 +80,9 @@ typecheck:  ## Type-check src/ and tests/
 check: lint typecheck test  ## Everything CI runs, locally
 
 # --- data operations (run inside the stack) --------------------------------------
+
+test-e2e:  ## Both warehouses end to end, in isolated buckets and database (stack must be up)
+	$(COMPOSE) exec -e WIKIFLOW_E2E_REQUIRED=1 airflow-scheduler pytest /opt/airflow/tests -m e2e
 
 reprocess:  ## Rebuild bronze from raw, no download: make reprocess FROM=2026-09-14T00 TO=2026-09-14T23
 	$(COMPOSE) exec airflow-scheduler python -m wikiflow.reprocess --start $(FROM) --end $(TO)
